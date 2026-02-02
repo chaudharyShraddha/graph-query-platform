@@ -1,0 +1,51 @@
+services:
+  # PostgreSQL Database - for application metadata
+  postgres:
+    image: postgres:14-alpine
+    container_name: graph_platform_postgres
+    environment:
+      POSTGRES_USER: graphuser
+      POSTGRES_PASSWORD: graphpass123
+      POSTGRES_DB: graph_platform_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U graphuser -d graph_platform_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Neo4j Graph Database - for graph data
+  neo4j:
+    image: neo4j:5.15.0
+    container_name: graph_platform_neo4j
+    environment:
+      NEO4J_AUTH: neo4j/neo4jpass123
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_allowlist: apoc.*
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt (database protocol)
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_plugins:/plugins
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:
+
