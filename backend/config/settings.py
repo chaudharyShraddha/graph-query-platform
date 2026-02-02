@@ -10,7 +10,12 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,12 +25,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-!b-a=fe1thyx!+pe02d1ut)7e0*k=d#2&+rp43prz$^=o(8v%3'
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-!b-a=fe1thyx!+pe02d1ut)7e0*k=d#2&+rp43prz$^=o(8v%3')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
 # Application definition
@@ -37,11 +42,22 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    
+    # Third-party apps
+    'rest_framework',
+    'corsheaders',
+    'channels',
+    
+    # Local apps
+    'datasets',
+    'queries',
+    'core',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # CORS middleware (should be early)
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -74,8 +90,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('POSTGRES_DB', 'graph_platform_db'),
+        'USER': os.getenv('POSTGRES_USER', 'graphuser'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'graphpass123'),
+        'HOST': os.getenv('POSTGRES_HOST', 'localhost'),
+        'PORT': os.getenv('POSTGRES_PORT', '5433'),
     }
 }
 
@@ -120,3 +140,128 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# ==============================================================================
+# REST Framework Configuration
+# ==============================================================================
+
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.AllowAny',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 100,
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+    'DEFAULT_PARSER_CLASSES': [
+        'rest_framework.parsers.JSONParser',
+        'rest_framework.parsers.MultiPartParser',
+        'rest_framework.parsers.FormParser',
+    ],
+}
+
+# ==============================================================================
+# CORS Configuration
+# ==============================================================================
+
+CORS_ALLOWED_ORIGINS = [
+    os.getenv('FRONTEND_URL', 'http://localhost:3000'),
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
+
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only in development
+
+# ==============================================================================
+# Django Channels Configuration
+# ==============================================================================
+
+ASGI_APPLICATION = 'config.asgi.application'
+
+# Use in-memory channel layers for development (no Redis required)
+# For production, use Redis: 'channels_redis.core.RedisChannelLayer'
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    },
+}
+
+# Uncomment below for Redis (production):
+# CHANNEL_LAYERS = {
+#     'default': {
+#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
+#         'CONFIG': {
+#             "hosts": [(os.getenv('REDIS_HOST', 'localhost'), int(os.getenv('REDIS_PORT', '6379')))],
+#         },
+#     },
+# }
+
+# ==============================================================================
+# Neo4j Configuration
+# ==============================================================================
+
+NEO4J_URI = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
+NEO4J_USER = os.getenv('NEO4J_USER', 'neo4j')
+NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD', 'neo4jpass123')
+
+# ==============================================================================
+# Logging Configuration
+# ==============================================================================
+
+# Create logs directory if it doesn't exist
+LOGS_DIR = BASE_DIR / 'logs'
+LOGS_DIR.mkdir(exist_ok=True)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        'file': {
+            'class': 'logging.FileHandler',
+            'filename': LOGS_DIR / 'django.log',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': os.getenv('DJANGO_LOG_LEVEL', 'INFO'),
+            'propagate': False,
+        },
+        'datasets': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'queries': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'core': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+    },
+}
