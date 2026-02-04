@@ -6,7 +6,6 @@ import logging
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from datetime import datetime
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +24,8 @@ class CSVValidator:
         self.file_path = Path(file_path)
         self.errors = []
         self.warnings = []
+        self.missing_required_columns = []  # Track missing columns from header validation
+        self.is_relationship_file = False  # Track if file has relationship columns
     
     def validate(self) -> Tuple[bool, List[str], List[str]]:
         """
@@ -34,7 +35,7 @@ class CSVValidator:
             Tuple of (is_valid, errors, warnings)
         """
         if not self.file_path.exists():
-            self.errors.append(f"File not found: {self.file_path}")
+            self.errors.append(f"File not found: {self.file_path.name}")
             return False, self.errors, self.warnings
         
         try:
@@ -42,24 +43,35 @@ class CSVValidator:
                 # Check if file is empty
                 first_char = f.read(1)
                 if not first_char:
-                    self.errors.append("CSV file is empty")
+                    self.errors.append("Empty file")
                     return False, self.errors, self.warnings
                 f.seek(0)
                 
-                # Read header
+                # Read header - First row MUST contain column headers
                 reader = csv.reader(f)
                 header = next(reader, None)
                 
                 if not header:
-                    self.errors.append("CSV file has no header row")
+                    self.errors.append("First row MUST contain column headers (property names)")
                     return False, self.errors, self.warnings
                 
-                # Validate header
-                self._validate_header(header)
+                # Validate header format
+                if not all(col.strip() for col in header):
+                    self.errors.append("First row MUST contain column headers (property names)")
+                    return False, self.errors, self.warnings
+                
+                # Detect file type and validate required columns
+                self._validate_required_columns(header)
+                
+                # Validate header for duplicates
+                self._validate_header_duplicates(header)
                 
                 # Validate rows
                 self._validate_rows(reader, header)
         
+        except csv.Error as e:
+            self.errors.append(f"CSV parsing error: {e}")
+            return False, self.errors, self.warnings
         except UnicodeDecodeError as e:
             self.errors.append(f"File encoding error: {e}")
             return False, self.errors, self.warnings
@@ -67,26 +79,100 @@ class CSVValidator:
             self.errors.append(f"Error reading CSV file: {e}")
             return False, self.errors, self.warnings
         
+        # Consolidate similar errors before returning
+        self._consolidate_errors()
+        
         is_valid = len(self.errors) == 0
         return is_valid, self.errors, self.warnings
     
-    def _validate_header(self, header: List[str]) -> None:
-        """Validate CSV header."""
-        # Check for required columns
+    def _consolidate_errors(self) -> None:
+        """Consolidate similar errors into simplified messages - show header errors only once."""
+        if not self.errors:
+            return
+        
+        # Track which columns are missing at header level
+        missing_header_cols = set(self.missing_required_columns)
+        
+        # Remove duplicates and filter out redundant row-level errors
+        seen = set()
+        consolidated = []
+        
+        for error in self.errors:
+            # Skip duplicates
+            if error in seen:
+                continue
+            seen.add(error)
+            
+            # Keep header-level errors (required fields messages)
+            if "For node files required fields" in error or "For relationship files required fields" in error:
+                consolidated.append(error)
+            # Skip row-level "Missing column" errors if column is already flagged at header level
+            elif "Row" in error and "Missing" in error:
+                # Check if this row error is about a column we already flagged at header level
+                is_redundant = False
+                for col in missing_header_cols:
+                    if col in error.lower():
+                        is_redundant = True
+                        break
+                if not is_redundant:
+                    consolidated.append(error)
+            else:
+                # Keep all other errors (empty values, column count mismatches, etc.)
+                consolidated.append(error)
+        
+        self.errors = consolidated
+    
+    def _validate_required_columns(self, header: List[str]) -> None:
+        """Validate required columns - check both node and relationship requirements."""
         header_lower = [col.lower().strip() for col in header]
+        header_set = set(header_lower)  # Use set for O(1) lookup
         
-        for required_col in self.REQUIRED_COLUMNS:
-            if required_col.lower() not in header_lower:
-                self.errors.append(f"Missing required column: {required_col}")
+        has_id = 'id' in header_set
+        has_source_id = 'source_id' in header_set
+        has_target_id = 'target_id' in header_set
         
-        # Check for duplicate columns
-        if len(header) != len(set(header_lower)):
-            duplicates = [col for col in header_lower if header_lower.count(col) > 1]
-            self.errors.append(f"Duplicate columns found: {set(duplicates)}")
+        # If file has source_id or target_id, it's likely a relationship file
+        # Check relationship requirements first
+        if has_source_id or has_target_id:
+            self.is_relationship_file = True
+            missing_rel_cols = []
+            if not has_source_id:
+                missing_rel_cols.append('source_id')
+                self.missing_required_columns.append('source_id')
+            if not has_target_id:
+                missing_rel_cols.append('target_id')
+                self.missing_required_columns.append('target_id')
+            
+            if missing_rel_cols:
+                cols_str = " and ".join(missing_rel_cols)
+                self.errors.append(f"For relationship files required fields: {cols_str}")
+        else:
+            # No relationship columns, check node requirements
+            self.is_relationship_file = False
+            if not has_id:
+                self.missing_required_columns.append('id')
+                self.errors.append("For node files required fields: id")
+    
+    def _validate_header_duplicates(self, header: List[str]) -> None:
+        """Validate header for duplicate columns."""
+        header_lower = [col.lower().strip() for col in header]
+        header_set = set(header_lower)
+        
+        # Check for duplicate columns (O(n) instead of O(n²))
+        if len(header) != len(header_set):
+            seen = set()
+            duplicates = []
+            for col in header_lower:
+                if col in seen and col not in duplicates:
+                    duplicates.append(col)
+                seen.add(col)
+            self.errors.append(f"Duplicate columns: {', '.join(duplicates)}")
     
     def _validate_rows(self, reader: csv.reader, header: List[str]) -> None:
-        """Validate CSV rows."""
+        """Validate CSV rows - All rows must have the same number of columns."""
         row_count = 0
+        expected_col_count = len(header)
+        
         for row_num, row in enumerate(reader, start=2):  # Start at 2 (header is row 1)
             # Skip completely empty rows (trailing newlines)
             if not row or all(not cell.strip() for cell in row):
@@ -94,18 +180,44 @@ class CSVValidator:
             
             row_count += 1
             
-            # Check if row has correct number of columns
-            if len(row) != len(header):
+            # All rows must have the same number of columns
+            if len(row) != expected_col_count:
                 self.errors.append(
-                    f"Row {row_num}: Expected {len(header)} columns, got {len(row)}"
+                    f"Row {row_num}: All rows must have the same number of columns ({len(row)} vs {expected_col_count})"
                 )
                 continue
+            
+            # Validate CSV escaping for special characters
+            self._validate_csv_escaping(row, row_num)
             
             # Validate row data
             self._validate_row_data(row, header, row_num)
         
         if row_count == 0:
-            self.warnings.append("CSV file has no data rows (only header)")
+            self.warnings.append("No data rows found")
+    
+    def _validate_csv_escaping(self, row: List[str], row_num: int) -> None:
+        """Validate proper CSV escaping for special characters."""
+        # Check for unescaped quotes, commas, and newlines
+        for col_idx, cell in enumerate(row, start=1):
+            if not cell:  # Skip empty cells
+                continue
+                
+            # Check for unescaped quotes (quotes should be doubled or escaped)
+            if '"' in cell:
+                quote_count = cell.count('"')
+                # If odd number of quotes and not properly quoted, warn
+                is_quoted = cell.startswith('"') and cell.endswith('"')
+                if quote_count % 2 != 0 and not is_quoted:
+                    self.warnings.append(
+                        f"Row {row_num}, Column {col_idx}: Possible unescaped quote - Proper CSV escaping for special characters required"
+                    )
+            
+            # Check for unescaped newlines (newlines in CSV should be within quoted fields)
+            if ('\n' in cell or '\r' in cell) and not (cell.startswith('"') and cell.endswith('"')):
+                self.warnings.append(
+                    f"Row {row_num}, Column {col_idx}: Newline detected - Proper CSV escaping for special characters required"
+                )
     
     def _validate_row_data(self, row: List[str], header: List[str], row_num: int) -> None:
         """Validate individual row data. Override in subclasses."""
@@ -121,25 +233,37 @@ class NodeCSVValidator(CSVValidator):
         super().__init__(file_path)
         self.node_label = node_label
     
+    def _validate_header(self, header: List[str]) -> None:
+        """Validate CSV header - uses base class unified validation."""
+        # Use the unified validation from base class
+        self._validate_required_columns(header)
+        self._validate_header_duplicates(header)
+    
     def _validate_row_data(self, row: List[str], header: List[str], row_num: int) -> None:
         """Validate node CSV row data."""
+        # Skip node validation if this is a relationship file
+        if self.is_relationship_file:
+            return
+        
         row_dict = dict(zip(header, row))
         
-        # Check ID column
-        id_col = None
-        for col in ['id', 'ID', 'Id', 'uuid', 'UUID', 'uuid_id']:
-            if col in row_dict and row_dict[col]:
-                id_col = col
-                break
+        # Skip ID column validation if it's already missing from header
+        if 'id' in self.missing_required_columns:
+            return
+        
+        # Check ID column - find case-insensitive match
+        id_col = next((col for col in row_dict if col.lower() == 'id'), None)
         
         if not id_col:
-            self.errors.append(f"Row {row_num}: No ID column found or ID is empty")
-        elif not row_dict[id_col].strip():
-            self.errors.append(f"Row {row_num}: ID value is empty")
+            # This shouldn't happen if header validation passed, but handle it gracefully
+            if 'id' not in self.missing_required_columns:
+                self.errors.append(f"Row {row_num}: Missing 'id' column")
+        elif not row_dict[id_col] or not str(row_dict[id_col]).strip():
+            self.errors.append(f"Row {row_num}: Empty 'id' value")
         
         # Check for empty rows (all values empty)
         if all(not val.strip() for val in row):
-            self.warnings.append(f"Row {row_num}: All values are empty")
+            self.warnings.append(f"Row {row_num}: Empty row")
 
 
 class RelationshipCSVValidator(CSVValidator):
@@ -151,23 +275,55 @@ class RelationshipCSVValidator(CSVValidator):
         super().__init__(file_path)
         self.relationship_type = relationship_type
     
+    def _validate_header(self, header: List[str]) -> None:
+        """Validate CSV header - uses base class unified validation."""
+        # Use the unified validation from base class
+        self._validate_required_columns(header)
+        self._validate_header_duplicates(header)
+    
     def _validate_row_data(self, row: List[str], header: List[str], row_num: int) -> None:
         """Validate relationship CSV row data."""
         row_dict = dict(zip(header, row))
         
+        # Skip validation for columns already flagged as missing from header
+        skip_source_id_check = 'source_id' in self.missing_required_columns
+        skip_target_id_check = 'target_id' in self.missing_required_columns
+        
+        # Find source_id and target_id columns (case-insensitive)
+        source_id_col = next((col for col in header if col.lower().strip() == 'source_id'), None)
+        target_id_col = next((col for col in header if col.lower().strip() == 'target_id'), None)
+        
         # Check source_id
-        source_id = row_dict.get('source_id', '').strip()
-        if not source_id:
-            self.errors.append(f"Row {row_num}: source_id is required and cannot be empty")
+        if skip_source_id_check:
+            source_id = None
+        elif source_id_col:
+            source_id = str(row_dict.get(source_id_col, '')).strip()
+            if not source_id:
+                self.errors.append(f"Row {row_num}: Empty 'source_id'")
+        else:
+            # This shouldn't happen if header validation passed
+            # Only add error if we haven't already flagged this column as missing
+            if 'source_id' not in self.missing_required_columns:
+                self.errors.append(f"Row {row_num}: Missing 'source_id' column")
+            source_id = None
         
         # Check target_id
-        target_id = row_dict.get('target_id', '').strip()
-        if not target_id:
-            self.errors.append(f"Row {row_num}: target_id is required and cannot be empty")
+        if skip_target_id_check:
+            target_id = None
+        elif target_id_col:
+            target_id = str(row_dict.get(target_id_col, '')).strip()
+            if not target_id:
+                self.errors.append(f"Row {row_num}: Empty 'target_id'")
+        else:
+            # This shouldn't happen if header validation passed
+            # Only add error if we haven't already flagged this column as missing
+            if 'target_id' not in self.missing_required_columns:
+                self.errors.append(f"Row {row_num}: Missing 'target_id' column")
+            target_id = None
         
         # Check if source and target are the same (warning, not error)
         if source_id and target_id and source_id == target_id:
-            self.warnings.append(f"Row {row_num}: source_id and target_id are the same")
+            self.warnings.append(f"Row {row_num}: The source and target IDs are the same. This creates a self-referencing relationship.")
 
 
 class CSVProcessor:
@@ -250,31 +406,27 @@ class CSVProcessor:
         if not values:
             return 'string'
         
-        # Sample first 100 values for type detection
+        # Sample first 100 values for type detection (optimize for large files)
         sample = values[:100]
+        sample_size = len(sample)
         
-        # Check for integers
-        int_count = sum(1 for v in sample if self._is_integer(v))
-        if int_count == len(sample):
+        # Check for integers (most common, check first)
+        if all(self._is_integer(v) for v in sample):
             return 'integer'
         
         # Check for floats
-        float_count = sum(1 for v in sample if self._is_float(v))
-        if float_count == len(sample):
+        if all(self._is_float(v) for v in sample):
             return 'float'
         
         # Check for booleans
-        bool_count = sum(1 for v in sample if self._is_boolean(v))
-        if bool_count == len(sample):
+        if all(self._is_boolean(v) for v in sample):
             return 'boolean'
         
         # Check for dates/datetimes
-        date_count = sum(1 for v in sample if self._is_date(v))
-        if date_count == len(sample):
+        if all(self._is_date(v) for v in sample):
             return 'date'
         
-        datetime_count = sum(1 for v in sample if self._is_datetime(v))
-        if datetime_count == len(sample):
+        if all(self._is_datetime(v) for v in sample):
             return 'datetime'
         
         # Default to string
@@ -422,6 +574,42 @@ def validate_relationship_csv(file_path: str, relationship_type: Optional[str] =
     """
     validator = RelationshipCSVValidator(file_path, relationship_type)
     return validator.validate()
+
+
+def detect_file_type(file_path: str) -> str:
+    """
+    Detect if a CSV file is a node or relationship file by examining its header.
+    
+    Args:
+        file_path: Path to CSV file
+        
+    Returns:
+        'node' or 'relationship'
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            
+            if not header:
+                # Default to node if we can't read header
+                return 'node'
+            
+            header_lower = [col.lower().strip() for col in header]
+            
+            # Check if it has relationship indicators
+            has_source_id = 'source_id' in header_lower
+            has_target_id = 'target_id' in header_lower
+            
+            if has_source_id and has_target_id:
+                return 'relationship'
+            
+            # Default to node
+            return 'node'
+    except Exception as e:
+        logger.warning(f"Error detecting file type for {file_path}: {e}")
+        # Default to node on error
+        return 'node'
 
 
 def parse_csv(file_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:

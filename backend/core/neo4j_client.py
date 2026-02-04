@@ -13,35 +13,58 @@ logger = logging.getLogger(__name__)
 class Neo4jClient:
     """Async Neo4j client wrapper."""
     
-    _driver: Optional[AsyncDriver] = None
     _instance = None
+    _drivers = None
+    _lock = None
     
     def __new__(cls):
         """Singleton pattern."""
         if cls._instance is None:
             cls._instance = super(Neo4jClient, cls).__new__(cls)
+            import threading
+            cls._lock = threading.Lock()
+            cls._drivers = {}  # thread_id -> driver mapping
         return cls._instance
     
     def __init__(self):
-        """Initialize Neo4j driver."""
-        if self._driver is None:
-            self._driver = AsyncGraphDatabase.driver(
-                settings.NEO4J_URI,
-                auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
-            )
-            logger.info("Neo4j driver initialized")
+        """Initialize Neo4j client."""
+        pass
+    
+    def get_driver(self) -> AsyncDriver:
+        """
+        Get or create the Neo4j driver for the current thread.
+        Each thread gets its own driver to avoid event loop conflicts.
+        """
+        import threading
+        thread_id = threading.get_ident()
+        
+        if thread_id not in self._drivers or self._drivers[thread_id] is None:
+            with self._lock:
+                # Double-check after acquiring lock
+                if thread_id not in self._drivers or self._drivers[thread_id] is None:
+                    self._drivers[thread_id] = AsyncGraphDatabase.driver(
+                        settings.NEO4J_URI,
+                        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+                    )
+                    logger.info(f"Neo4j driver initialized for thread {threading.current_thread().name} (ID: {thread_id})")
+        
+        return self._drivers[thread_id]
     
     async def close(self):
-        """Close the driver connection."""
-        if self._driver:
-            await self._driver.close()
-            self._driver = None
-            logger.info("Neo4j driver closed")
+        """Close the driver connection for the current thread."""
+        import threading
+        thread_id = threading.get_ident()
+        
+        if thread_id in self._drivers and self._drivers[thread_id] is not None:
+            await self._drivers[thread_id].close()
+            self._drivers[thread_id] = None
+            logger.info(f"Neo4j driver closed for thread {threading.current_thread().name}")
     
     async def verify_connectivity(self) -> bool:
         """Verify connection to Neo4j database."""
         try:
-            await self._driver.verify_connectivity()
+            driver = self.get_driver()
+            await driver.verify_connectivity()
             logger.info("Neo4j connectivity verified")
             return True
         except Exception as e:
@@ -67,7 +90,8 @@ class Neo4jClient:
             parameters = {}
         
         try:
-            async with self._driver.session() as session:
+            driver = self.get_driver()
+            async with driver.session() as session:
                 result = await session.run(query, parameters)
                 records = await result.data()
                 logger.debug(f"Query executed successfully: {len(records)} records returned")
@@ -111,7 +135,8 @@ class Neo4jClient:
                 query = f"CREATE (n:{label} $props) RETURN n"
                 parameters = {'props': properties}
             
-            async with self._driver.session() as session:
+            driver = self.get_driver()
+            async with driver.session() as session:
                 result = await session.run(query, parameters)
                 record = await result.single()
                 if record:
@@ -151,6 +176,7 @@ class Neo4jClient:
                 
                 if unique_id:
                     # Use UNWIND with MERGE for batch creation with uniqueness
+                    # Note: unique_id is inserted as a literal in the f-string
                     query = f"""
                     UNWIND $nodes AS node
                     MERGE (n:{label} {{{unique_id}: node.{unique_id}}})
@@ -166,7 +192,8 @@ class Neo4jClient:
                     RETURN count(n) as count
                     """
                 
-                async with self._driver.session() as session:
+                driver = self.get_driver()
+                async with driver.session() as session:
                     result = await session.run(query, {'nodes': batch})
                     record = await result.single()
                     if record:
@@ -223,7 +250,8 @@ class Neo4jClient:
                 'props': properties
             }
             
-            async with self._driver.session() as session:
+            driver = self.get_driver()
+            async with driver.session() as session:
                 result = await session.run(query, parameters)
                 record = await result.single()
                 if record:
@@ -264,37 +292,60 @@ class Neo4jClient:
         created_count = 0
         
         try:
-            for i in range(0, len(relationships), batch_size):
-                batch = relationships[i:i + batch_size]
-                
-                query = f"""
-                UNWIND $rels AS rel
-                MATCH (source:{source_label} {{{source_id_key}: rel.source_id}})
-                MATCH (target:{target_label} {{{target_id_key}: rel.target_id}})
-                CREATE (source)-[r:{relationship_type}]->(target)
-                SET r = rel.props
-                RETURN count(r) as count
-                """
-                
-                # Prepare batch data
-                batch_data = []
-                for rel in batch:
-                    rel_data = {
-                        'source_id': rel.get('source_id'),
-                        'target_id': rel.get('target_id'),
-                        'props': rel.get('properties', {})
-                    }
-                    batch_data.append(rel_data)
-                
-                async with self._driver.session() as session:
-                    result = await session.run(query, {'rels': batch_data})
-                    record = await result.single()
-                    if record:
-                        created_count += record['count']
-                
-                logger.debug(f"Batch {i//batch_size + 1}: Created {len(batch)} relationships")
+            driver = self.get_driver()
+            async with driver.session() as session:
+                for i in range(0, len(relationships), batch_size):
+                    batch = relationships[i:i + batch_size]
+                    
+                    # Escape relationship type if it contains special characters
+                    rel_type_escaped = f"`{relationship_type}`" if not relationship_type.replace('_', '').isalnum() else relationship_type
+                    
+                    # Use ON CREATE to track newly created relationships
+                    # Match nodes by ID (dataset_id is already in the node properties)
+                    query = f"""
+                    UNWIND $rels AS rel
+                    MATCH (source:{source_label} {{{source_id_key}: rel.source_id}})
+                    MATCH (target:{target_label} {{{target_id_key}: rel.target_id}})
+                    MERGE (source)-[r:{rel_type_escaped}]->(target)
+                    ON CREATE SET r = rel.props
+                    ON MATCH SET r = rel.props
+                    RETURN count(r) as count
+                    """
+                    
+                    # Prepare batch data
+                    batch_data = []
+                    for rel in batch:
+                        rel_data = {
+                            'source_id': rel.get('source_id'),
+                            'target_id': rel.get('target_id'),
+                            'props': rel.get('properties', {})
+                        }
+                        batch_data.append(rel_data)
+                    
+                    try:
+                        result = await session.run(query, {'rels': batch_data})
+                        record = await result.single()
+                        if record:
+                            batch_created = record['count']
+                            created_count += batch_created
+                            logger.info(f"Batch {i//batch_size + 1}: Created/updated {batch_created}/{len(batch)} relationships of type {relationship_type}")
+                            
+                            if batch_created < len(batch):
+                                logger.warning(
+                                    f"Batch {i//batch_size + 1}: Only processed {batch_created}/{len(batch)} relationships. "
+                                    f"Some source or target nodes may not exist. "
+                                    f"Looking for nodes with label '{source_label}' or '{target_label}'"
+                                )
+                        else:
+                            logger.warning(f"Batch {i//batch_size + 1}: No relationships processed - check if nodes exist")
+                            logger.warning(f"Query: {query}")
+                            logger.warning(f"Batch data sample: {batch_data[:2] if batch_data else 'empty'}")
+                    except Exception as batch_error:
+                        logger.error(f"Error processing batch {i//batch_size + 1}: {batch_error}", exc_info=True)
+                        # Continue with next batch instead of failing completely
+                        continue
             
-            logger.info(f"Created {created_count} relationships of type {relationship_type}")
+            logger.info(f"Total relationships created/updated: {created_count} of type {relationship_type}")
             return created_count
         except Exception as e:
             logger.error(f"Batch relationship creation failed: {e}")
@@ -316,14 +367,16 @@ class Neo4jClient:
             
             # Get all node labels
             labels_query = "CALL db.labels()"
-            async with self._driver.session() as session:
+            driver = self.get_driver()
+            async with driver.session() as session:
                 result = await session.run(labels_query)
                 labels = await result.values()
                 schema['node_labels'] = [label[0] for label in labels]
             
             # Get all relationship types
             rel_types_query = "CALL db.relationshipTypes()"
-            async with self._driver.session() as session:
+            driver = self.get_driver()
+            async with driver.session() as session:
                 result = await session.run(rel_types_query)
                 rel_types = await result.values()
                 schema['relationship_types'] = [rel_type[0] for rel_type in rel_types]
@@ -335,7 +388,8 @@ class Neo4jClient:
                 RETURN keys(n) as keys
                 LIMIT 100
                 """
-                async with self._driver.session() as session:
+                driver = self.get_driver()
+            async with driver.session() as session:
                     result = await session.run(query)
                     records = await result.data()
                     if records:
@@ -359,7 +413,8 @@ class Neo4jClient:
             else:
                 query = "MATCH (n) RETURN count(n) as count"
             
-            async with self._driver.session() as session:
+            driver = self.get_driver()
+            async with driver.session() as session:
                 result = await session.run(query)
                 record = await result.single()
                 return record['count'] if record else 0
@@ -375,7 +430,8 @@ class Neo4jClient:
             else:
                 query = "MATCH ()-[r]->() RETURN count(r) as count"
             
-            async with self._driver.session() as session:
+            driver = self.get_driver()
+            async with driver.session() as session:
                 result = await session.run(query)
                 record = await result.single()
                 return record['count'] if record else 0

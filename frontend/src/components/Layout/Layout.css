@@ -1,0 +1,31 @@
+/**
+ * Minimal Professional Layout
+ */
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background-color: var(--bg-secondary);
+}
+
+.layout-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin-top: 64px; /* Height of navigation bar */
+}
+
+.layout-content {
+  flex: 1;
+  padding: var(--space-6);
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+@media (max-width: 768px) {
+  .layout-content {
+    padding: var(--space-4);
+  }
+}
