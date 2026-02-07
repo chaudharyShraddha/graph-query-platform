@@ -1,0 +1,16 @@
+# Django Framework
+Django==5.2.10
+djangorestframework==3.15.2
+
+# Database Drivers
+psycopg2-binary==2.9.10
+neo4j==5.20.0
+
+# WebSockets and Async
+channels==4.1.0
+channels-redis==4.2.0
+
+# CORS and Utilities
+django-cors-headers==4.6.0
+python-dotenv==1.0.1
+
