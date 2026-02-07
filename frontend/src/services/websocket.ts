@@ -1,7 +1,16 @@
 /**
- * WebSocket manager for real-time task progress updates
+ * WebSocket manager for real-time task progress updates.
+ * 
+ * Provides automatic reconnection, ping/pong keepalive, and
+ * robust error handling for real-time task progress tracking.
  */
 import type { WebSocketMessage } from '@/types';
+import {
+  WS_PING_INTERVAL,
+  WS_MAX_RECONNECT_ATTEMPTS,
+  WS_RECONNECT_DELAY,
+  WS_MAX_RECONNECT_DELAY,
+} from '@/constants';
 
 type MessageHandler = (message: WebSocketMessage) => void;
 type ConnectionHandler = () => void;
@@ -19,12 +28,12 @@ class WebSocketManager {
   private ws: WebSocket | null = null;
   private config: WebSocketConfig | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectDelay = 1000; // Start with 1 second
-  private maxReconnectDelay = 30000; // Max 30 seconds
+  private readonly maxReconnectAttempts = WS_MAX_RECONNECT_ATTEMPTS;
+  private reconnectDelay = WS_RECONNECT_DELAY;
+  private readonly maxReconnectDelay = WS_MAX_RECONNECT_DELAY;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
-  private readonly pingIntervalMs = 30000; // Ping every 30 seconds
+  private readonly pingIntervalMs = WS_PING_INTERVAL;
   private isManualClose = false;
 
   /**
@@ -51,8 +60,8 @@ class WebSocketManager {
       this.ws = new WebSocket(wsUrl);
 
       this.ws.onopen = () => {
-        this.reconnectAttempts = 0;
-        this.reconnectDelay = 1000;
+      this.reconnectAttempts = 0;
+      this.reconnectDelay = WS_RECONNECT_DELAY;
         this.config?.onConnect?.();
         this.startPingInterval();
       };

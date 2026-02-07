@@ -1,7 +1,10 @@
 /**
- * Datasets Dashboard Page
+ * Datasets Dashboard Page.
+ * 
+ * Main page for managing datasets with upload, view, download, and delete functionality.
+ * Includes filtering, search, and real-time progress tracking.
  */
-import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import { fetchDatasets, deleteDataset, setCurrentDataset } from '@/store/slices/datasetsSlice';
 import { datasetsApi } from '@/services/datasets';
@@ -18,7 +21,7 @@ const DatasetsPage = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [dateFilter, setDateFilter] = useState<string>('all');
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [viewMode] = useState<'grid' | 'list'>('grid');
   const [selectedDataset, setSelectedDataset] = useState<number | null>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [openFromUpload, setOpenFromUpload] = useState(false);
@@ -158,7 +161,7 @@ const DatasetsPage = () => {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename;
+      a.download = filename || 'dataset.zip';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);

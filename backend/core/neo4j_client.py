@@ -1,8 +1,11 @@
 """
 Neo4j async client for graph database operations.
+
+This module provides a thread-safe singleton wrapper around the Neo4j async driver,
+ensuring proper connection management and avoiding event loop conflicts.
 """
-import os
 import logging
+import threading
 from typing import Dict, List, Optional, Any
 from neo4j import AsyncGraphDatabase, AsyncDriver
 from django.conf import settings
@@ -18,12 +21,11 @@ class Neo4jClient:
     _lock = None
     
     def __new__(cls):
-        """Singleton pattern."""
+        """Singleton pattern implementation."""
         if cls._instance is None:
             cls._instance = super(Neo4jClient, cls).__new__(cls)
-            import threading
             cls._lock = threading.Lock()
-            cls._drivers = {}  # thread_id -> driver mapping
+            cls._drivers: Dict[int, Optional[AsyncDriver]] = {}
         return cls._instance
     
     def __init__(self):
@@ -35,7 +37,6 @@ class Neo4jClient:
         Get or create the Neo4j driver for the current thread.
         Each thread gets its own driver to avoid event loop conflicts.
         """
-        import threading
         thread_id = threading.get_ident()
         
         if thread_id not in self._drivers or self._drivers[thread_id] is None:
@@ -52,7 +53,6 @@ class Neo4jClient:
     
     async def close(self):
         """Close the driver connection for the current thread."""
-        import threading
         thread_id = threading.get_ident()
         
         if thread_id in self._drivers and self._drivers[thread_id] is not None:
@@ -301,11 +301,14 @@ class Neo4jClient:
                     rel_type_escaped = f"`{relationship_type}`" if not relationship_type.replace('_', '').isalnum() else relationship_type
                     
                     # Use ON CREATE to track newly created relationships
-                    # Match nodes by ID (dataset_id is already in the node properties)
+                    # Match nodes by ID and dataset_id to ensure we're matching the correct nodes
+                    # Use WHERE clause for dataset_id since it can't be in property map with rel reference
                     query = f"""
                     UNWIND $rels AS rel
                     MATCH (source:{source_label} {{{source_id_key}: rel.source_id}})
+                    WHERE source.dataset_id = rel.dataset_id
                     MATCH (target:{target_label} {{{target_id_key}: rel.target_id}})
+                    WHERE target.dataset_id = rel.dataset_id
                     MERGE (source)-[r:{rel_type_escaped}]->(target)
                     ON CREATE SET r = rel.props
                     ON MATCH SET r = rel.props
@@ -315,10 +318,12 @@ class Neo4jClient:
                     # Prepare batch data
                     batch_data = []
                     for rel in batch:
+                        props = rel.get('properties', {})
                         rel_data = {
                             'source_id': rel.get('source_id'),
                             'target_id': rel.get('target_id'),
-                            'props': rel.get('properties', {})
+                            'dataset_id': props.get('dataset_id'),  # Extract dataset_id for matching
+                            'props': props
                         }
                         batch_data.append(rel_data)
                     
@@ -382,18 +387,18 @@ class Neo4jClient:
                 schema['relationship_types'] = [rel_type[0] for rel_type in rel_types]
             
             # Get properties for each label
-            for label in schema['node_labels']:
-                query = f"""
-                MATCH (n:{label})
-                RETURN keys(n) as keys
-                LIMIT 100
-                """
-                driver = self.get_driver()
+            driver = self.get_driver()
             async with driver.session() as session:
+                for label in schema['node_labels']:
+                    query = f"""
+                    MATCH (n:{label})
+                    RETURN keys(n) as keys
+                    LIMIT 100
+                    """
                     result = await session.run(query)
                     records = await result.data()
                     if records:
-                        # Get unique properties
+                        # Get unique properties using set for O(1) lookups
                         all_keys = set()
                         for record in records:
                             all_keys.update(record.get('keys', []))

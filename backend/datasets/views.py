@@ -1,12 +1,16 @@
 """
 API views for Dataset management.
+
+This module provides REST API endpoints for uploading, managing, and downloading
+CSV datasets, including real-time progress tracking via WebSockets.
 """
-import os
 import zipfile
 import tempfile
 import logging
+import threading
+import shutil
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import status
@@ -14,8 +18,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from asgiref.sync import async_to_sync
-
-logger = logging.getLogger(__name__)
 
 from datasets.models import Dataset, UploadTask
 from datasets.serializers import (
@@ -26,7 +28,9 @@ from datasets.serializers import (
 )
 from datasets.tasks import start_upload_task
 from core.neo4j_client import neo4j_client
-from core.csv_processor import parse_csv
+from core.csv_processor import detect_file_type
+
+logger = logging.getLogger(__name__)
 
 
 class DatasetUploadView(APIView):
@@ -78,7 +82,6 @@ class DatasetUploadView(APIView):
                         destination.write(chunk)
                 
                 # Detect file type by examining CSV header
-                from core.csv_processor import detect_file_type
                 file_type = detect_file_type(str(file_path))
                 
                 # Determine label/relationship type from filename
@@ -119,46 +122,69 @@ class DatasetListView(APIView):
         datasets = Dataset.objects.all().order_by('-created_at')
         
         # For completed datasets, refresh counts from Neo4j to ensure accuracy
+        # Run in background to avoid blocking the response
         def refresh_counts_sync():
-            from datasets.models import UploadTask
-            
-            completed_datasets = [d for d in datasets if d.status == 'completed']
-            if not completed_datasets:
-                return
-            
-            async def refresh_counts_async():
-                for dataset in completed_datasets:
-                    # Get relationship types from tasks
-                    tasks = list(UploadTask.objects.filter(dataset_id=dataset.id, file_type='relationship'))
-                    rel_types = [t.relationship_type for t in tasks if t.relationship_type]
-                    
-                    if rel_types:
-                        total_rel_count = 0
-                        for rel_type in rel_types:
-                            try:
-                                rel_type_escaped = f"`{rel_type}`" if not rel_type.replace('_', '').isalnum() else rel_type
-                                query = f"MATCH ()-[r:{rel_type_escaped}]->() WHERE r.dataset_id = $dataset_id RETURN count(r) as count"
-                                result = await neo4j_client.execute_query(query, {'dataset_id': dataset.id})
-                                count = result[0]['count'] if result and len(result) > 0 else 0
-                                total_rel_count += count
-                            except Exception as e:
-                                logger.warning(f"Error counting '{rel_type}': {e}")
-                        
-                        # Update if different
-                        if dataset.total_relationships != total_rel_count:
-                            dataset.total_relationships = total_rel_count
-                            await dataset.asave(update_fields=['total_relationships', 'updated_at'])
-            
-            # Run async function in sync context
-            try:
-                async_to_sync(refresh_counts_async)()
-            except Exception as e:
-                logger.warning(f"Error refreshing counts: {e}")
+                completed_datasets = [d for d in datasets if d.status == 'completed']
+                if not completed_datasets:
+                    return
+                
+                async def refresh_counts_async():
+                    for dataset in completed_datasets:
+                        try:
+                            # Get relationship types from tasks
+                            tasks = list(
+                                UploadTask.objects.filter(
+                                    dataset_id=dataset.id,
+                                    file_type='relationship'
+                                ).values_list('relationship_type', flat=True)
+                            )
+                            rel_types = [t for t in tasks if t]
+                            
+                            if rel_types:
+                                total_rel_count = 0
+                                for rel_type in rel_types:
+                                    try:
+                                        rel_type_escaped = (
+                                            f"`{rel_type}`"
+                                            if not rel_type.replace('_', '').isalnum()
+                                            else rel_type
+                                        )
+                                        query = (
+                                            f"MATCH ()-[r:{rel_type_escaped}]->() "
+                                            f"WHERE r.dataset_id = $dataset_id "
+                                            f"RETURN count(r) as count"
+                                        )
+                                        result = await neo4j_client.execute_query(
+                                            query,
+                                            {'dataset_id': dataset.id}
+                                        )
+                                        count = result[0]['count'] if result else 0
+                                        total_rel_count += count
+                                    except Exception as e:
+                                        logger.warning(f"Error counting '{rel_type}': {e}")
+                                
+                                # Update if different
+                                if dataset.total_relationships != total_rel_count:
+                                    dataset.total_relationships = total_rel_count
+                                    await dataset.asave(
+                                        update_fields=['total_relationships', 'updated_at']
+                                    )
+                        except Exception as e:
+                            logger.warning(f"Error refreshing counts for dataset {dataset.id}: {e}")
+                
+                # Run async function in sync context
+                try:
+                    async_to_sync(refresh_counts_async)()
+                except Exception as e:
+                    logger.warning(f"Error refreshing counts: {e}")
         
         # Refresh counts for completed datasets (run in background to avoid blocking)
         try:
-            import threading
-            thread = threading.Thread(target=refresh_counts_sync, daemon=True)
+            thread = threading.Thread(
+                target=refresh_counts_sync,
+                daemon=True,
+                name=f"CountRefresh-{timezone.now().timestamp()}"
+            )
             thread.start()
         except Exception as e:
             logger.warning(f"Error starting count refresh thread: {e}")
@@ -180,6 +206,12 @@ class DatasetDetailView(APIView):
             return Response(
                 {'error': 'Dataset not found'},
                 status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Error retrieving dataset {pk}: {e}", exc_info=True)
+            return Response(
+                {'error': 'Internal server error'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 
@@ -258,14 +290,15 @@ class DatasetMetadataView(APIView):
                 
                 # Get sample data (first 10 nodes of each label for this dataset)
                 sample_data = {}
-                for label in node_labels[:5]:  # Limit to first 5 labels
+                MAX_SAMPLE_LABELS = 5
+                for label in node_labels[:MAX_SAMPLE_LABELS]:
                     query = f"MATCH (n:{label}) WHERE n.dataset_id = $dataset_id RETURN n LIMIT 10"
                     results = await neo4j_client.execute_query(query, {'dataset_id': dataset.id})
                     sample_data[label] = results[:10]
                 
                 # Get sample data for relationship types (first 10 relationships of each type)
                 sample_relationships = {}
-                for rel_type in rel_types[:5]:  # Limit to first 5 relationship types
+                for rel_type in rel_types[:MAX_SAMPLE_LABELS]:
                     try:
                         rel_type_escaped = f"`{rel_type}`" if not rel_type.replace('_', '').isalnum() else rel_type
                         query = f"MATCH (a)-[r:{rel_type_escaped}]->(b) WHERE r.dataset_id = $dataset_id RETURN r, a, b LIMIT 10"
@@ -470,7 +503,6 @@ class DatasetDeleteView(APIView):
             # Delete associated files
             upload_dir = Path('uploads') / str(dataset.id)
             if upload_dir.exists():
-                import shutil
                 shutil.rmtree(upload_dir)
             
             # Delete dataset (cascade will delete tasks)

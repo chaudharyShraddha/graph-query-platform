@@ -1,5 +1,9 @@
 """
 CSV processing utilities for parsing and validating node and relationship CSV files.
+
+This module provides comprehensive CSV validation, type detection, and parsing
+functionality for both node and relationship CSV files with proper error handling
+and performance optimizations.
 """
 import csv
 import logging
@@ -8,6 +12,10 @@ from pathlib import Path
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# Constants
+TYPE_DETECTION_SAMPLE_SIZE = 100
+MAX_ROW_VALIDATION = 10000  # Limit row validation for very large files
 
 
 class CSVProcessingError(Exception):
@@ -109,11 +117,8 @@ class CSVValidator:
             # Skip row-level "Missing column" errors if column is already flagged at header level
             elif "Row" in error and "Missing" in error:
                 # Check if this row error is about a column we already flagged at header level
-                is_redundant = False
-                for col in missing_header_cols:
-                    if col in error.lower():
-                        is_redundant = True
-                        break
+                error_lower = error.lower()
+                is_redundant = any(col.lower() in error_lower for col in missing_header_cols)
                 if not is_redundant:
                     consolidated.append(error)
             else:
@@ -169,9 +174,15 @@ class CSVValidator:
             self.errors.append(f"Duplicate columns: {', '.join(duplicates)}")
     
     def _validate_rows(self, reader: csv.reader, header: List[str]) -> None:
-        """Validate CSV rows - All rows must have the same number of columns."""
+        """
+        Validate CSV rows - All rows must have the same number of columns.
+        
+        For very large files, validation is limited to first MAX_ROW_VALIDATION rows
+        to prevent performance issues.
+        """
         row_count = 0
         expected_col_count = len(header)
+        validation_limit = MAX_ROW_VALIDATION
         
         for row_num, row in enumerate(reader, start=2):  # Start at 2 (header is row 1)
             # Skip completely empty rows (trailing newlines)
@@ -180,10 +191,20 @@ class CSVValidator:
             
             row_count += 1
             
+            # Limit validation for very large files
+            if row_count > validation_limit:
+                if row_count == validation_limit + 1:
+                    self.warnings.append(
+                        f"File has more than {validation_limit} rows. "
+                        f"Validation limited to first {validation_limit} rows."
+                    )
+                continue
+            
             # All rows must have the same number of columns
             if len(row) != expected_col_count:
                 self.errors.append(
-                    f"Row {row_num}: All rows must have the same number of columns ({len(row)} vs {expected_col_count})"
+                    f"Row {row_num}: All rows must have the same number of columns "
+                    f"({len(row)} vs {expected_col_count})"
                 )
                 continue
             
@@ -377,12 +398,14 @@ class CSVProcessor:
             raise CSVProcessingError(f"Failed to parse CSV file: {e}")
     
     def _detect_data_types(self) -> None:
-        """Detect data types for each column."""
+        """Detect data types for each column using optimized list comprehension."""
         if not self.data:
             return
         
+        # Pre-extract non-null values for all columns at once for better performance
         for col in self.header:
-            values = [row[col] for row in self.data if row[col] is not None]
+            # Use generator expression for memory efficiency
+            values = [row[col] for row in self.data if row.get(col) is not None]
             
             if not values:
                 self.metadata['data_types'][col] = 'unknown'
@@ -390,7 +413,7 @@ class CSVProcessor:
                 continue
             
             # Store sample value
-            self.metadata['sample_values'][col] = values[0] if values else None
+            self.metadata['sample_values'][col] = values[0]
             
             # Detect type
             detected_type = self._detect_column_type(values)
@@ -400,15 +423,16 @@ class CSVProcessor:
         """
         Detect the data type of a column based on sample values.
         
+        Uses early return pattern for performance optimization.
+        
         Returns:
             Type string: 'integer', 'float', 'boolean', 'date', 'datetime', 'string'
         """
         if not values:
             return 'string'
         
-        # Sample first 100 values for type detection (optimize for large files)
-        sample = values[:100]
-        sample_size = len(sample)
+        # Sample values for type detection (optimize for large files)
+        sample = values[:TYPE_DETECTION_SAMPLE_SIZE]
         
         # Check for integers (most common, check first)
         if all(self._is_integer(v) for v in sample):

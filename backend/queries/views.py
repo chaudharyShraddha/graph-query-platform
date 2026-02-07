@@ -151,14 +151,14 @@ class QueryListView(APIView):
     
     def get(self, request):
         """Get list of saved queries."""
-        queries = SavedQuery.objects.all().order_by('-updated_at')
+        queryset = SavedQuery.objects.select_related('created_by').order_by('-updated_at')
         
         # Filter by favorite if requested
         favorite_only = request.query_params.get('favorite', '').lower() == 'true'
         if favorite_only:
-            queries = queries.filter(is_favorite=True)
+            queryset = queryset.filter(is_favorite=True)
         
-        serializer = SavedQueryListSerializer(queries, many=True)
+        serializer = SavedQueryListSerializer(queryset, many=True)
         return Response(serializer.data)
 
 
@@ -167,12 +167,12 @@ class QueryHistoryView(APIView):
     
     def get(self, request):
         """Get query execution history."""
-        executions = QueryExecution.objects.select_related('query', 'executed_by').order_by('-executed_at')
+        queryset = QueryExecution.objects.select_related(
+            'query',
+            'executed_by'
+        ).order_by('-executed_at')[:100]  # Limit to last 100 executions
         
-        # Limit to last 100 executions
-        executions = executions[:100]
-        
-        serializer = QueryExecutionSerializer(executions, many=True)
+        serializer = QueryExecutionSerializer(queryset, many=True)
         return Response(serializer.data)
 
 

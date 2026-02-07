@@ -10,7 +10,15 @@ interface DatasetCardProps {
   dataset: Dataset;
   viewMode: 'grid' | 'list';
   onView: () => void;
-  onDownload: (datasetId: number, fileType?: 'node' | 'relationship') => void;
+  onDownload: (
+    datasetId: number,
+    options?: {
+      fileType?: 'node' | 'relationship';
+      nodeLabel?: string;
+      relationshipType?: string;
+      asZip?: boolean;
+    }
+  ) => void;
   onDelete: (datasetId: number) => void;
 }
 

@@ -1,12 +1,14 @@
 """
 Async background tasks for processing CSV file uploads.
+
+This module handles asynchronous processing of CSV files for both node and relationship
+data, including validation, parsing, type conversion, and Neo4j database operations.
 """
 import asyncio
 import logging
-from typing import Dict, Any, Optional
-from pathlib import Path
+import threading
+from typing import Dict, Any, Optional, List, Set, Tuple
 from datetime import datetime
-from django.db import transaction
 from django.utils import timezone
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
@@ -64,16 +66,19 @@ async def update_dataset_status(dataset_id: int) -> None:
     """
     try:
         dataset = await Dataset.objects.aget(id=dataset_id)
-        # Use async queryset to get tasks
+        
+        # Use async queryset aggregation for better performance
         tasks = []
+        status_counts = {'completed': 0, 'failed': 0, 'processing': 0, 'pending': 0}
+        
         async for task in UploadTask.objects.filter(dataset_id=dataset_id):
             tasks.append(task)
+            status_counts[task.status] = status_counts.get(task.status, 0) + 1
         
-        # Count completed and failed tasks
-        completed_count = sum(1 for task in tasks if task.status == 'completed')
-        failed_count = sum(1 for task in tasks if task.status == 'failed')
-        processing_count = sum(1 for task in tasks if task.status == 'processing')
-        pending_count = sum(1 for task in tasks if task.status == 'pending')
+        completed_count = status_counts['completed']
+        failed_count = status_counts['failed']
+        processing_count = status_counts['processing']
+        pending_count = status_counts['pending']
         
         # Update processed_files
         dataset.processed_files = completed_count + failed_count
@@ -182,13 +187,12 @@ async def process_node_csv_task(task_id: int) -> None:
             return
         
         # Process nodes in batches
-        batch_size = 100
-        total_batches = (len(data) + batch_size - 1) // batch_size
+        total_batches = (len(data) + BATCH_SIZE - 1) // BATCH_SIZE
         nodes_created = 0
         
         for batch_num in range(total_batches):
-            start_idx = batch_num * batch_size
-            end_idx = min(start_idx + batch_size, len(data))
+            start_idx = batch_num * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, len(data))
             batch = data[start_idx:end_idx]
             
             # Prepare nodes for Neo4j
@@ -234,7 +238,7 @@ async def process_node_csv_task(task_id: int) -> None:
                     label=task.node_label or 'Node',
                     nodes=neo4j_nodes,
                     unique_id=id_column,
-                    batch_size=batch_size
+                    batch_size=BATCH_SIZE
                 )
                 nodes_created += created_count
                 
@@ -410,27 +414,158 @@ async def process_relationship_csv_task(task_id: int) -> None:
         if not node_labels:
             node_labels = ['Node']
             logger.warning("No node labels found, defaulting to 'Node'")
+
+        # Determine source and target labels
+        # Strategy 1: Use relationship type name to infer labels (e.g., PURCHASED = Customer->Product)
+        # Strategy 2: If inference fails, use ID matching with better heuristics
+        source_label = None
+        target_label = None
         
-        # For relationships, try to match source_id and target_id to nodes
-        # We'll try all node labels and use the first one that works
-        # In a more sophisticated implementation, we'd determine this from the data
-        source_label = node_labels[0]  # Use first available label
-        target_label = node_labels[0]  # Use first available label
+        # Try to infer labels from relationship type name
+        inferred_source, inferred_target = infer_labels_from_relationship_type(
+            task.relationship_type,
+            node_labels
+        )
+        if inferred_source and inferred_target:
+            source_label = inferred_source
+            target_label = inferred_target
+            logger.info(
+                f"Inferred labels from relationship type '{task.relationship_type}': "
+                f"{source_label} -> {target_label}"
+            )
         
-        # If we have multiple labels, we could be smarter, but for now use the first one
+        # If inference didn't work, fall back to ID matching
+        if not source_label or not target_label:
+            if len(node_labels) == 1:
+                # Only one label, use it for both
+                source_label = node_labels[0]
+                target_label = node_labels[0]
+            else:
+                # Multiple labels - try to determine which label each ID belongs to
+                # Sample first few rows to check
+                sample_size = min(DEFAULT_SAMPLE_SIZE, len(data))
+                sample_source_ids = set()
+                sample_target_ids = set()
+                
+                for row in data[:sample_size]:
+                    source_id = row.get('source_id') or row.get('SOURCE_ID') or row.get('Source_ID')
+                    target_id = row.get('target_id') or row.get('TARGET_ID') or row.get('Target_ID')
+                    
+                    # Find case-insensitive matches
+                    for key, value in row.items():
+                        if key.lower().strip() == 'source_id' and value:
+                            sample_source_ids.add(value)
+                        elif key.lower().strip() == 'target_id' and value:
+                            sample_target_ids.add(value)
+                
+                # Query Neo4j to find which labels these IDs belong to
+                # Strategy: For each sample ID, check which label it belongs to, then use the most common label
+                # This handles cases where IDs overlap across labels (e.g., Customer id=1 and Product id=1)
+                try:
+                    if sample_source_ids:
+                        # Convert IDs to integers if possible, but keep track of original values
+                        test_ids = []
+                        for sid in list(sample_source_ids)[:MAX_SAMPLE_IDS]:
+                            try:
+                                test_ids.append(int(sid))
+                            except (ValueError, TypeError):
+                                test_ids.append(sid)
+                        
+                        if test_ids:
+                            # For each ID, find which label(s) it belongs to
+                            label_counts = {label: 0 for label in node_labels}
+                            for test_id in test_ids:
+                                for label in node_labels:
+                                    # Check if this specific ID exists in this label with this dataset_id
+                                    query = f"MATCH (n:{label} {{id: $id, dataset_id: $dataset_id}}) RETURN count(n) as count"
+                                    result = await neo4j_client.execute_query(query, {'id': test_id, 'dataset_id': task.dataset_id})
+                                    if result and result[0].get('count', 0) > 0:
+                                        label_counts[label] += 1
+                            
+                            # Find the label with the most matches
+                            best_label = max(label_counts.items(), key=lambda x: x[1])[0] if label_counts else None
+                            best_count = max(label_counts.values()) if label_counts else 0
+                            
+                            if best_label and best_count > 0:
+                                # Only use this if we haven't already inferred from relationship type
+                                if not source_label:
+                                    source_label = best_label
+                                    logger.info(f"Determined source label from ID matching: {source_label} (matched {best_count}/{len(test_ids)} sample IDs)")
+                                    logger.info(f"Label match counts: {label_counts}")
+                                else:
+                                    logger.info(f"Source label already inferred as {source_label}, skipping ID matching")
+                            else:
+                                logger.warning(f"Could not determine source label from sample IDs: {test_ids}")
+                    
+                    if sample_target_ids:
+                        # Convert IDs to integers if possible
+                        test_ids = []
+                        for tid in list(sample_target_ids)[:MAX_SAMPLE_IDS]:
+                            try:
+                                test_ids.append(int(tid))
+                            except (ValueError, TypeError):
+                                test_ids.append(tid)
+                        
+                        if test_ids:
+                            # For each ID, find which label(s) it belongs to
+                            label_counts = {label: 0 for label in node_labels}
+                            for test_id in test_ids:
+                                for label in node_labels:
+                                    # Check if this specific ID exists in this label with this dataset_id
+                                    query = f"MATCH (n:{label} {{id: $id, dataset_id: $dataset_id}}) RETURN count(n) as count"
+                                    result = await neo4j_client.execute_query(query, {'id': test_id, 'dataset_id': task.dataset_id})
+                                    if result and result[0].get('count', 0) > 0:
+                                        label_counts[label] += 1
+                            
+                            # Find the label with the most matches
+                            best_label = max(label_counts.items(), key=lambda x: x[1])[0] if label_counts else None
+                            best_count = max(label_counts.values()) if label_counts else 0
+                            
+                            if best_label and best_count > 0:
+                                # Only use this if we haven't already inferred from relationship type
+                                if not target_label:
+                                    target_label = best_label
+                                    logger.info(f"Determined target label from ID matching: {target_label} (matched {best_count}/{len(test_ids)} sample IDs)")
+                                    logger.info(f"Label match counts: {label_counts}")
+                                else:
+                                    logger.info(f"Target label already inferred as {target_label}, skipping ID matching")
+                            else:
+                                logger.warning(f"Could not determine target label from sample IDs: {test_ids}")
+                except Exception as e:
+                    logger.warning(f"Error determining labels from Neo4j: {e}", exc_info=True)
+            
+            # Fallback: if we couldn't determine, use intelligent defaults
+            if not source_label:
+                source_label = node_labels[0]
+                logger.warning(f"Could not determine source label, using fallback: {source_label}")
+            if not target_label:
+                # Use different label if available, otherwise same as source
+                if len(node_labels) > 1:
+                    # Try to use a different label than source
+                    target_label = node_labels[1] if node_labels[1] != source_label else (node_labels[2] if len(node_labels) > 2 else node_labels[0])
+                else:
+                    target_label = node_labels[0]
+                logger.warning(f"Could not determine target label, using fallback: {target_label}")
+            
+            # Final validation: warn if source and target are the same when we have multiple labels
+            if source_label == target_label and len(node_labels) > 1:
+                logger.warning(
+                    f"WARNING: Source and target labels are the same ({source_label}) but multiple labels exist: {node_labels}. "
+                    f"This might indicate incorrect label detection. Please verify your relationship CSV data."
+                )
+        
         logger.info(f"Processing relationship file '{task.file_name}' with type '{task.relationship_type}'")
         logger.info(f"Using node labels: source={source_label}, target={target_label}")
         logger.info(f"Found {len(data)} relationship rows to process")
         
         
         # Process relationships in batches
-        batch_size = 100
-        total_batches = (len(data) + batch_size - 1) // batch_size
+        total_batches = (len(data) + BATCH_SIZE - 1) // BATCH_SIZE
         relationships_created = 0
         
         for batch_num in range(total_batches):
-            start_idx = batch_num * batch_size
-            end_idx = min(start_idx + batch_size, len(data))
+            start_idx = batch_num * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, len(data))
             batch = data[start_idx:end_idx]
             
             # Prepare relationships for Neo4j
@@ -451,11 +586,25 @@ async def process_relationship_csv_task(task_id: int) -> None:
                     continue
                 
                 # Convert IDs to integers if they're numeric (to match node IDs)
+                # This ensures type consistency with how node IDs are stored
                 try:
-                    source_id = int(source_id) if str(source_id).isdigit() else source_id
-                    target_id = int(target_id) if str(target_id).isdigit() else target_id
-                except (ValueError, TypeError):
-                    # Keep as string if conversion fails
+                    # Try to convert to int, handling strings and already-int values
+                    if isinstance(source_id, str):
+                        source_id = source_id.strip()
+                        if source_id.isdigit() or (source_id.startswith('-') and source_id[1:].isdigit()):
+                            source_id = int(source_id)
+                    elif isinstance(source_id, (int, float)):
+                        source_id = int(source_id)
+                    
+                    if isinstance(target_id, str):
+                        target_id = target_id.strip()
+                        if target_id.isdigit() or (target_id.startswith('-') and target_id[1:].isdigit()):
+                            target_id = int(target_id)
+                    elif isinstance(target_id, (int, float)):
+                        target_id = int(target_id)
+                except (ValueError, TypeError, AttributeError):
+                    # Keep as original value if conversion fails
+                    logger.debug(f"Could not convert IDs to int: source_id={source_id}, target_id={target_id}")
                     pass
                 
                 rel_data = {
@@ -465,10 +614,31 @@ async def process_relationship_csv_task(task_id: int) -> None:
                 }
                 
                 # Add other properties (excluding source_id and target_id in any case)
+                # Convert values to appropriate types based on detected metadata
                 for key, value in row.items():
                     key_lower = key.lower().strip()
                     if key_lower not in ['source_id', 'target_id']:
-                        rel_data['properties'][key] = value
+                        # Convert value based on detected type from metadata
+                        data_type = metadata.get('data_types', {}).get(key, 'string')
+                        converted_value = value
+                        
+                        if value is not None and value != '':
+                            try:
+                                if data_type == 'integer':
+                                    converted_value = int(value)
+                                elif data_type == 'float':
+                                    converted_value = float(value)
+                                elif data_type == 'boolean':
+                                    converted_value = str(value).lower() in ['true', '1', 'yes']
+                                # Keep dates and strings as-is for now
+                            except (ValueError, TypeError):
+                                # If conversion fails, keep original value
+                                logger.debug(f"Could not convert relationship property {key}={value} to {data_type}, keeping as string")
+                                converted_value = value
+                        else:
+                            converted_value = None
+                        
+                        rel_data['properties'][key] = converted_value
                 
                 # Add dataset_id to relationship properties to track which dataset it belongs to
                 rel_data['properties']['dataset_id'] = task.dataset_id
@@ -484,7 +654,7 @@ async def process_relationship_csv_task(task_id: int) -> None:
                     target_id_key='id',
                     relationship_type=task.relationship_type or 'RELATED_TO',
                     relationships=neo4j_rels,
-                    batch_size=batch_size
+                    batch_size=BATCH_SIZE
                 )
                 
                 logger.info(f"Batch {batch_num + 1}: Created {created_count} relationships (expected {len(batch)})")
@@ -643,6 +813,73 @@ async def process_upload_task(task_id: int) -> None:
             pass
 
 
+# Constants
+BATCH_SIZE = 100
+DEFAULT_SAMPLE_SIZE = 5
+MAX_SAMPLE_IDS = 10
+MAX_LABELS_TO_CHECK = 5
+
+# Relationship type to label mapping patterns
+RELATIONSHIP_PATTERNS = {
+    'PURCHASED': ('Customer', 'Product'),
+    'BUY': ('Customer', 'Product'),
+    'ORDER': ('Customer', 'Product'),
+    'FOLLOWS': ('User', 'User'),
+    'FOLLOW': ('User', 'User'),
+    'IN_CATEGORY': ('Product', 'Category'),
+    'CATEGORY': ('Product', 'Category'),
+    'VIEWED': ('Customer', 'Product'),
+    'VIEW': ('Customer', 'Product'),
+    'AUTHORED': ('User', 'Post'),
+    'AUTHOR': ('User', 'Post'),
+    'COMMENTED': ('User', 'Comment'),
+    'COMMENT': ('User', 'Comment'),
+}
+
+
+def infer_labels_from_relationship_type(
+    relationship_type: str,
+    available_labels: List[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Infer source and target labels from relationship type name.
+    
+    Args:
+        relationship_type: Relationship type name (e.g., 'PURCHASED')
+        available_labels: List of available node labels in the dataset
+        
+    Returns:
+        Tuple of (source_label, target_label) or (None, None) if inference fails
+    """
+    if not relationship_type:
+        return None, None
+    
+    rel_type_upper = relationship_type.upper()
+    
+    # Check against known patterns
+    for pattern, (default_source, default_target) in RELATIONSHIP_PATTERNS.items():
+        if pattern in rel_type_upper:
+            # Try exact match first
+            if default_source in available_labels and default_target in available_labels:
+                return default_source, default_target
+            
+            # Try Customer as fallback for User
+            if default_source == 'User' and 'Customer' in available_labels:
+                if default_target == 'User' and 'Customer' in available_labels:
+                    return 'Customer', 'Customer'
+                elif default_target in available_labels:
+                    return 'Customer', default_target
+            
+            # Try Post/Comment fallbacks
+            if default_source == 'User' and 'Customer' in available_labels:
+                if default_target == 'Post' and 'Post' in available_labels:
+                    return 'Customer', 'Post'
+                elif default_target == 'Comment' and 'Comment' in available_labels:
+                    return 'Customer', 'Comment'
+    
+    return None, None
+
+
 def start_upload_task(task_id: int) -> None:
     """
     Start an upload task asynchronously.
@@ -651,10 +888,6 @@ def start_upload_task(task_id: int) -> None:
     Args:
         task_id: UploadTask ID
     """
-    # Always run in a separate thread with its own event loop
-    # This prevents event loop conflicts with Django Channels or other async contexts
-    import threading
-    
     def run_task():
         # Create a new event loop for this thread
         new_loop = asyncio.new_event_loop()
@@ -666,6 +899,6 @@ def start_upload_task(task_id: int) -> None:
         finally:
             new_loop.close()
     
-    thread = threading.Thread(target=run_task, daemon=True)
+    thread = threading.Thread(target=run_task, daemon=True, name=f"UploadTask-{task_id}")
     thread.start()
 

@@ -1,10 +1,14 @@
 /**
- * API client configuration and base functions
+ * API client configuration and base functions.
+ * 
+ * Provides centralized axios instance with request/response interceptors
+ * for authentication, error handling, and consistent API communication.
  */
 import axios, { AxiosError } from 'axios';
 import type { AxiosInstance } from 'axios';
 import type { ApiError } from '@/types';
 import { toast } from '@/utils/toast';
+import { API_TIMEOUT, STORAGE_KEYS } from '@/constants';
 
 // API base URL - adjust based on your backend
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
@@ -14,7 +18,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000
  */
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000, // 30 seconds
+  timeout: API_TIMEOUT,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -26,7 +30,7 @@ const apiClient: AxiosInstance = axios.create({
 apiClient.interceptors.request.use(
   (config) => {
     // Add auth token if available
-    const token = localStorage.getItem('auth_token');
+    const token = localStorage.getItem(STORAGE_KEYS.AUTH_TOKEN);
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -63,7 +67,7 @@ apiClient.interceptors.response.use(
       switch (status) {
         case 401:
           // Unauthorized - always show this as it's critical
-          localStorage.removeItem('auth_token');
+          localStorage.removeItem(STORAGE_KEYS.AUTH_TOKEN);
           toast.error('Session expired. Please login again.', 'Unauthorized');
           window.location.href = '/login';
           break;

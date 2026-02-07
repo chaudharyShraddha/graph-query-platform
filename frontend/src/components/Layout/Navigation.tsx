@@ -4,7 +4,7 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useAppSelector, useAppDispatch } from '@/store/hooks';
 import { toggleSidebar } from '@/store/slices/uiSlice';
-import { MenuIcon, DashboardIcon, DatasetsIcon, QueriesIcon, SchemaIcon } from '@/components/Icons/Icons';
+import { MenuIcon, DatasetsIcon, QueriesIcon } from '@/components/Icons/Icons';
 import './Navigation.css';
 
 const Navigation = () => {
@@ -13,16 +13,11 @@ const Navigation = () => {
   const sidebarOpen = useAppSelector((state) => state.ui.sidebarOpen);
 
   const navItems = [
-    { path: '/', label: 'Dashboard', icon: DashboardIcon },
     { path: '/datasets', label: 'Datasets', icon: DatasetsIcon },
     { path: '/queries', label: 'Queries', icon: QueriesIcon },
-    { path: '/schema', label: 'Schema', icon: SchemaIcon },
   ];
 
   const isActive = (path: string) => {
-    if (path === '/') {
-      return location.pathname === '/';
-    }
     return location.pathname.startsWith(path);
   };
 
@@ -37,7 +32,7 @@ const Navigation = () => {
           >
             <MenuIcon />
           </button>
-          <Link to="/" className="navigation-logo">
+          <Link to="/queries" className="navigation-logo">
             <span className="navigation-logo-text">Graph Query Platform</span>
           </Link>
         </div>
