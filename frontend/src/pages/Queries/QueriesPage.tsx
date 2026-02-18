@@ -1,7 +1,7 @@
 /**
  * Queries Page - Cypher Query Interface
  */
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import { executeQuery, fetchQueries, saveQuery, fetchSchema, fetchQueryHistory, deleteQuery } from '@/store/slices/queriesSlice';
 import { toast } from '@/utils/toast';
@@ -10,7 +10,7 @@ import QueryResults from '@/components/QueryResults/QueryResults';
 import SchemaExplorer from '@/components/SchemaExplorer/SchemaExplorer';
 import QueryHistory from '@/components/QueryHistory/QueryHistory';
 import { PlayIcon, SaveIcon, PlusIcon, CloseIcon, SchemaIcon, HistoryIcon, DeleteIcon } from '@/components/Icons/Icons';
-import { QUERY_TEMPLATES, STORAGE_KEYS } from '@/constants';
+import { QUERY_TEMPLATES } from '@/constants';
 import './QueriesPage.css';
 
 interface QueryTab {
@@ -24,10 +24,8 @@ interface QueryTab {
 const QueriesPage = () => {
   const dispatch = useAppDispatch();
   const { executing, error, schema, queries } = useAppSelector((state) => state.queries);
-  const [tabs, setTabs] = useState<QueryTab[]>([
-    { id: '1', name: 'Query 1', query: '', isDirty: false },
-  ]);
-  const [activeTabId, setActiveTabId] = useState<string>('1');
+  const [tabs, setTabs] = useState<QueryTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string>('');
   const [lastExecutionResult, setLastExecutionResult] = useState<{
     results: any[];
     executionTime?: number;
@@ -36,7 +34,6 @@ const QueriesPage = () => {
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [showSchemaSidebar, setShowSchemaSidebar] = useState(true);
   const [showHistorySidebar, setShowHistorySidebar] = useState(false);
-  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Get active tab
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0];
@@ -73,92 +70,34 @@ const QueriesPage = () => {
     loadData();
   }, [dispatch, schema]);
 
-  // Auto-save functionality
+  // Load tabs from saved queries API
   useEffect(() => {
-    if (autoSaveTimerRef.current) {
-      clearTimeout(autoSaveTimerRef.current);
-    }
+    if (queries === undefined) return; // Wait for queries to be loaded
 
-    if (activeTab && activeTab.query.trim() && activeTab.isDirty) {
-      autoSaveTimerRef.current = setTimeout(() => {
-        // Auto-save to localStorage
-        const savedTabs = tabs.map((tab) =>
-          tab.id === activeTabId ? { ...tab, isDirty: false } : tab
-        );
-        setTabs(savedTabs);
-        localStorage.setItem(STORAGE_KEYS.QUERY_TABS, JSON.stringify(savedTabs));
-      }, 2000); // Auto-save after 2 seconds of inactivity
-    }
-
-    return () => {
-      if (autoSaveTimerRef.current) {
-        clearTimeout(autoSaveTimerRef.current);
-      }
-    };
-  }, [activeTab?.query, activeTabId, tabs]);
-
-  // Load tabs from localStorage and database on mount
-  useEffect(() => {
-    const loadTabs = () => {
-      // Get saved query IDs from database for validation
-      const savedQueryIds = new Set(queries?.map(q => q.id) || []);
+    if (queries && queries.length > 0) {
+      // Create tabs from saved queries
+      const queryTabs: QueryTab[] = queries.map((q) => ({
+        id: `saved-${q.id}`,
+        name: q.name,
+        query: q.cypher_query, // Ensure query text is populated
+        isDirty: false,
+        savedQueryId: q.id,
+      }));
       
-      // First, try to load from localStorage (for unsaved work)
-      const savedTabs = localStorage.getItem(STORAGE_KEYS.QUERY_TABS);
-      if (savedTabs) {
-        try {
-          const parsedTabs: QueryTab[] = JSON.parse(savedTabs);
-          
-          // Filter out tabs that reference deleted saved queries
-          const validTabs = parsedTabs.filter(tab => {
-            // Keep tabs without savedQueryId (unsaved work)
-            if (!tab.savedQueryId) return true;
-            // Only keep tabs if the saved query still exists in database
-            return savedQueryIds.has(tab.savedQueryId);
-          });
-          
-          // Update localStorage with filtered tabs
-          if (validTabs.length !== parsedTabs.length) {
-            localStorage.setItem('query-tabs', JSON.stringify(validTabs));
-          }
-          
-          if (validTabs.length > 0) {
-            setTabs(validTabs);
-            setActiveTabId(validTabs[0].id);
-            return;
-          }
-        } catch (e) {
-          // Invalid JSON, clear it and continue to load from database
-          localStorage.removeItem(STORAGE_KEYS.QUERY_TABS);
-        }
-      }
-      
-      // If no localStorage tabs, load recent saved queries from database
-      if (queries && queries.length > 0) {
-        const queryTabs: QueryTab[] = queries.slice(0, 5).map((q) => ({
-          id: `saved-${q.id}`,
-          name: q.name,
-          query: q.cypher_query,
-          isDirty: false,
-          savedQueryId: q.id,
-        }));
-        if (queryTabs.length > 0) {
-          setTabs(queryTabs);
-          setActiveTabId(queryTabs[0].id);
-        }
-      }
-    };
-    
-    // Wait for queries to be loaded
-    if (queries !== undefined) {
-      loadTabs();
+      setTabs(queryTabs);
+      setActiveTabId(queryTabs[0].id);
+    } else {
+      // No saved queries - create one empty tab
+      const emptyTab: QueryTab = {
+        id: 'new-1',
+        name: 'Query 1',
+        query: '',
+        isDirty: false,
+      };
+      setTabs([emptyTab]);
+      setActiveTabId(emptyTab.id);
     }
   }, [queries]);
-
-  // Save tabs to localStorage when they change
-  useEffect(() => {
-    localStorage.setItem('query-tabs', JSON.stringify(tabs));
-  }, [tabs]);
 
   // Handle query change
   const handleQueryChange = useCallback((value: string) => {
@@ -171,7 +110,7 @@ const QueriesPage = () => {
 
   // Create new tab
   const handleNewTab = useCallback(() => {
-    const newId = `tab-${Date.now()}`;
+    const newId = `new-${Date.now()}`;
     const newTab: QueryTab = {
       id: newId,
       name: `Query ${tabs.length + 1}`,
@@ -206,15 +145,18 @@ const QueriesPage = () => {
 
   // Execute query
   const handleExecute = useCallback(async () => {
-    if (!activeTab || !activeTab.query.trim()) {
+    if (!activeTab || !activeTab.query?.trim()) {
       toast.error('Please enter a query to execute', 'Error');
       return;
     }
 
     try {
-      const result = await dispatch(
-        executeQuery({ query: activeTab.query })
-      ).unwrap();
+      // Use query_id if it's a saved query, otherwise use query text
+      const executeRequest = activeTab.savedQueryId
+        ? { query_id: activeTab.savedQueryId }
+        : { query: activeTab.query };
+
+      const result = await dispatch(executeQuery(executeRequest)).unwrap();
 
       if (result.status === 'success') {
         setLastExecutionResult({
@@ -222,7 +164,6 @@ const QueriesPage = () => {
           executionTime: result.execution_time,
           rowsReturned: result.rows_returned,
         });
-        // Refresh query history after successful execution
         dispatch(fetchQueryHistory());
         toast.success(
           `Query executed successfully. ${result.rows_returned} rows returned in ${result.execution_time.toFixed(2)}s`,
@@ -230,7 +171,6 @@ const QueriesPage = () => {
         );
       } else {
         setLastExecutionResult(null);
-        // Refresh query history even on error
         dispatch(fetchQueryHistory());
         toast.error(result.error_message || 'Query execution failed', 'Error');
       }
@@ -242,7 +182,7 @@ const QueriesPage = () => {
 
   // Save query
   const handleSave = useCallback(async () => {
-    if (!activeTab || !activeTab.query.trim()) {
+    if (!activeTab || !activeTab.query?.trim()) {
       toast.error('Please enter a query to save', 'Error');
       return;
     }
@@ -255,6 +195,7 @@ const QueriesPage = () => {
         })
       ).unwrap();
 
+      // Update tab with saved query info
       setTabs((prevTabs) =>
         prevTabs.map((tab) =>
           tab.id === activeTabId
@@ -263,8 +204,8 @@ const QueriesPage = () => {
         )
       );
 
-      // Refresh queries list
-      dispatch(fetchQueries());
+      // Refresh queries list from API
+      await dispatch(fetchQueries()).unwrap();
 
       toast.success('Query saved successfully', 'Success');
     } catch (error: any) {
@@ -274,7 +215,7 @@ const QueriesPage = () => {
 
   // Load template
   const handleLoadTemplate = useCallback((template: { name: string; query: string }) => {
-    const newId = `tab-${Date.now()}`;
+    const newId = `new-${Date.now()}`;
     const newTab: QueryTab = {
       id: newId,
       name: template.name,
@@ -313,8 +254,6 @@ const QueriesPage = () => {
   // Handle query selection from history
   const handleSelectHistoryQuery = useCallback((query: string) => {
     if (!activeTab) return;
-    
-    // Update current tab with selected query
     handleQueryChange(query);
     setShowHistorySidebar(false);
     toast.success('Query loaded from history', 'Success');
@@ -336,24 +275,22 @@ const QueriesPage = () => {
         if (newTabs.length === 0) {
           // Create a new empty tab if all tabs were deleted
           const newTab: QueryTab = {
-            id: '1',
+            id: 'new-1',
             name: 'Query 1',
             query: '',
             isDirty: false,
           };
           setTabs([newTab]);
-          setActiveTabId('1');
+          setActiveTabId(newTab.id);
         } else {
           setTabs(newTabs);
           if (activeTabId === tabToRemove.id) {
             setActiveTabId(newTabs[0].id);
           }
         }
-        // Update localStorage
-        localStorage.setItem('query-tabs', JSON.stringify(newTabs));
       }
       
-      // Refresh queries list
+      // Refresh queries list from API
       await dispatch(fetchQueries()).unwrap();
       
       toast.success('Query deleted successfully', 'Success');
@@ -470,7 +407,7 @@ const QueriesPage = () => {
               <button
                 className="btn btn-primary"
                 onClick={handleExecute}
-                disabled={executing || !activeTab?.query.trim()}
+                disabled={executing || !activeTab?.query?.trim()}
               >
                 <PlayIcon size={16} />
                 <span>Execute</span>
@@ -479,7 +416,7 @@ const QueriesPage = () => {
               <button
                 className="btn btn-secondary"
                 onClick={handleSave}
-                disabled={!activeTab?.query.trim()}
+                disabled={!activeTab?.query?.trim()}
               >
                 <SaveIcon size={16} />
                 <span>Save</span>
@@ -519,4 +456,3 @@ const QueriesPage = () => {
 };
 
 export default QueriesPage;
-

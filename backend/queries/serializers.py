@@ -49,6 +49,7 @@ class SavedQueryListSerializer(serializers.ModelSerializer):
             'id',
             'name',
             'description',
+            'cypher_query',
             'created_by_username',
             'created_at',
             'updated_at',
