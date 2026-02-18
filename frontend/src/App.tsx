@@ -17,7 +17,7 @@ function App() {
       <Router>
         <Layout>
           <Routes>
-            <Route path="/" element={<Navigate to="/queries" replace />} />
+            <Route path="/" element={<Navigate to="/datasets" replace />} />
             <Route path="/datasets" element={<DatasetsPage />} />
             <Route path="/queries" element={<QueriesPage />} />
           </Routes>
