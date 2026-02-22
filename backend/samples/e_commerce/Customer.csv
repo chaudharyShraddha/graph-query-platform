@@ -1,0 +1,12 @@
+id,name,email,age,address,city,state,zipcode,phone,created_at
+1,John Doe,john@example.com,32,123 Main St,New York,NY,10001,555-0101,2024-01-10
+2,Jane Smith,jane@example.com,28,456 Oak Ave,Los Angeles,CA,90001,555-0102,2024-01-11
+3,Mike Johnson,mike@example.com,35,789 Pine Rd,Chicago,IL,60601,555-0103,2024-01-12
+4,Sarah Williams,sarah@example.com,29,321 Elm St,San Francisco,CA,94102,555-0104,2024-01-13
+5,Tom Brown,tom@example.com,41,654 Maple Dr,Boston,MA,02101,555-0105,2024-01-14
+6,Lisa Davis,lisa@example.com,26,987 Cedar Ln,Seattle,WA,98101,555-0106,2024-01-15
+7,Chris Wilson,chris@example.com,33,147 Birch Way,Miami,FL,33101,555-0107,2024-01-16
+8,Emily Taylor,emily@example.com,30,258 Spruce St,Austin,TX,78701,555-0108,2024-01-17
+9,Alex Martinez,alex@example.com,27,369 Willow Ave,Denver,CO,80201,555-0109,2024-01-18
+10,Jessica Garcia,jessica@example.com,31,741 Ash Blvd,Portland,OR,97201,555-0110,2024-01-19
+

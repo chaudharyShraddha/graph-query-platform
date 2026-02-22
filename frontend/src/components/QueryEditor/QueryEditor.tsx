@@ -47,7 +47,6 @@ const QueryEditor = ({
   height = '400px',
   onExecute,
   schema,
-  onInsertText,
 }: QueryEditorProps) => {
   const editorRef = useRef<HTMLDivElement>(null);
 

@@ -206,7 +206,49 @@ class Neo4jClient:
         except Exception as e:
             logger.error(f"Batch node creation failed: {e}")
             raise
-    
+
+    async def delete_nodes_not_in_set(
+        self,
+        label: str,
+        dataset_id: int,
+        id_property: str,
+        ids_in_file: List[Any],
+    ) -> int:
+        """
+        Delete nodes of the given label and dataset_id whose id is not in ids_in_file.
+        Used when re-uploading a node file with "sync": removes nodes no longer in the file.
+        Uses DETACH DELETE so relationships are also removed.
+
+        Args:
+            label: Node label (e.g. 'Person')
+            dataset_id: Dataset id stored on nodes
+            id_property: Property name for the node id (e.g. 'id')
+            ids_in_file: List of id values that are in the uploaded file (keep these)
+
+        Returns:
+            Number of nodes deleted
+        """
+        try:
+            driver = self.get_driver()
+            # Cypher: match nodes of this label+dataset whose id is not in the keep list
+            query = f"""
+            MATCH (n:{label})
+            WHERE n.dataset_id = $dataset_id AND NOT n.{id_property} IN $ids
+            DETACH DELETE n
+            """
+            async with driver.session() as session:
+                result = await session.run(
+                    query,
+                    {'dataset_id': dataset_id, 'ids': ids_in_file}
+                )
+                summary = await result.consume()
+                deleted = summary.counters.nodes_deleted if summary.counters else 0
+            logger.info(f"Sync nodes: deleted {deleted} nodes of type {label} (dataset_id={dataset_id}) not in file")
+            return deleted
+        except Exception as e:
+            logger.error(f"delete_nodes_not_in_set failed: {e}")
+            raise
+
     async def create_relationship(
         self,
         source_label: str,
@@ -442,6 +484,31 @@ class Neo4jClient:
                 return record['count'] if record else 0
         except Exception as e:
             logger.error(f"Relationship count query failed: {e}")
+            raise
+
+    async def delete_relationships_of_type_for_dataset(
+        self, relationship_type: str, dataset_id: int
+    ) -> None:
+        """Delete all relationships of this type for the dataset (used before re-upload to sync to file)."""
+        try:
+            rel_type_escaped = (
+                f"`{relationship_type}`"
+                if not relationship_type.replace("_", "").isalnum()
+                else relationship_type
+            )
+            query = (
+                f"MATCH ()-[r:{rel_type_escaped}]->() "
+                "WHERE r.dataset_id = $dataset_id "
+                "DELETE r"
+            )
+            driver = self.get_driver()
+            async with driver.session() as session:
+                await session.run(query, {"dataset_id": dataset_id})
+            logger.info(
+                f"Deleted relationships of type '{relationship_type}' for dataset {dataset_id}"
+            )
+        except Exception as e:
+            logger.error(f"Delete relationships failed: {e}")
             raise
 
 

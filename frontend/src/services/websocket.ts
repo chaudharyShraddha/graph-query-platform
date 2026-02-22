@@ -1,9 +1,4 @@
-/**
- * WebSocket manager for real-time task progress updates.
- * 
- * Provides automatic reconnection, ping/pong keepalive, and
- * robust error handling for real-time task progress tracking.
- */
+/** WebSocket for task progress: reconnect, ping/pong, message handler. */
 import type { WebSocketMessage } from '@/types';
 import {
   WS_PING_INTERVAL,
@@ -36,9 +31,6 @@ class WebSocketManager {
   private readonly pingIntervalMs = WS_PING_INTERVAL;
   private isManualClose = false;
 
-  /**
-   * Connect to WebSocket for a specific task
-   */
   connect(config: WebSocketConfig): void {
     this.config = config;
     this.isManualClose = false;
@@ -46,9 +38,6 @@ class WebSocketManager {
     this.connectInternal();
   }
 
-  /**
-   * Internal connection logic
-   */
   private connectInternal(): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       return;
@@ -70,8 +59,8 @@ class WebSocketManager {
         try {
           const message: WebSocketMessage = JSON.parse(event.data);
           this.handleMessage(message);
-        } catch (error) {
-          // Silently handle parse errors - invalid messages are ignored
+        } catch {
+          // Ignore parse errors
         }
       };
 
@@ -82,8 +71,6 @@ class WebSocketManager {
       this.ws.onclose = () => {
         this.stopPingInterval();
         this.config?.onDisconnect?.();
-
-        // Attempt to reconnect if not manually closed
         if (!this.isManualClose && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.scheduleReconnect();
         }
@@ -95,9 +82,6 @@ class WebSocketManager {
     }
   }
 
-  /**
-   * Schedule reconnection attempt
-   */
   private scheduleReconnect(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -116,40 +100,23 @@ class WebSocketManager {
     }, delay);
   }
 
-  /**
-   * Handle incoming WebSocket messages
-   */
   private handleMessage(message: WebSocketMessage): void {
-    // Handle ping/pong
-    if (message.type === 'pong') {
-      return; // Pong received, connection is alive
-    }
-
-    // Call message handler
+    if (message.type === 'pong') return;
     this.config?.onMessage?.(message);
   }
 
-  /**
-   * Send message to WebSocket
-   */
   send(message: Record<string, any>): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
     }
   }
 
-  /**
-   * Send ping to keep connection alive
-   */
   private sendPing(): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.send({ type: 'ping' });
     }
   }
 
-  /**
-   * Start ping interval
-   */
   private startPingInterval(): void {
     this.stopPingInterval();
     this.pingInterval = setInterval(() => {
@@ -157,9 +124,6 @@ class WebSocketManager {
     }, this.pingIntervalMs);
   }
 
-  /**
-   * Stop ping interval
-   */
   private stopPingInterval(): void {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
@@ -167,16 +131,10 @@ class WebSocketManager {
     }
   }
 
-  /**
-   * Request current task status
-   */
   requestStatus(): void {
     this.send({ type: 'get_status' });
   }
 
-  /**
-   * Disconnect WebSocket
-   */
   disconnect(): void {
     this.isManualClose = true;
     this.stopPingInterval();
@@ -192,9 +150,6 @@ class WebSocketManager {
     }
   }
 
-  /**
-   * Get WebSocket connection status
-   */
   getStatus(): 'connecting' | 'open' | 'closing' | 'closed' {
     if (!this.ws) return 'closed';
     switch (this.ws.readyState) {
@@ -209,16 +164,23 @@ class WebSocketManager {
     }
   }
 
-  /**
-   * Get WebSocket URL for a task
-   */
+  /** WS URL from VITE_WS_HOST or API host (so backend receives connection). */
   private getWebSocketUrl(taskId: number): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = import.meta.env.VITE_WS_HOST || window.location.host;
+    let host: string;
+    if (import.meta.env.VITE_WS_HOST) {
+      host = import.meta.env.VITE_WS_HOST;
+    } else {
+      const apiUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+      try {
+        host = new URL(apiUrl).host;
+      } catch {
+        host = window.location.host;
+      }
+    }
     return `${protocol}//${host}/ws/tasks/${taskId}/`;
   }
 }
 
-// Singleton instance
 export const websocketManager = new WebSocketManager();
 

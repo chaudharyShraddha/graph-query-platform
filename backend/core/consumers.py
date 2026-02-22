@@ -68,13 +68,28 @@ class TaskProgressConsumer(AsyncWebsocketConsumer):
                     'task_id': self.task_id
                 }))
             elif message_type == 'get_status':
-                # Send current task status
+                # Send current task status in shape frontend expects (data.status, data.percentage, etc.)
                 task_data = await self.get_task_data(self.task_id)
-                await self.send(text_data=json.dumps({
-                    'type': 'status',
-                    'task_id': self.task_id,
-                    'task': task_data
-                }))
+                if task_data is not None:
+                    await self.send(text_data=json.dumps({
+                        'type': 'status',
+                        'task_id': self.task_id,
+                        'task': task_data,
+                        'data': {
+                            'status': task_data.get('status', 'pending'),
+                            'percentage': task_data.get('progress_percentage') or 0,
+                            'progress_percentage': task_data.get('progress_percentage') or 0,
+                            'message': task_data.get('error_message') or None,
+                            'error': task_data.get('error_message'),
+                            'error_message': task_data.get('error_message'),
+                        }
+                    }))
+                else:
+                    await self.send(text_data=json.dumps({
+                        'type': 'status',
+                        'task_id': self.task_id,
+                        'data': {'status': 'pending', 'percentage': 0}
+                    }))
             else:
                 logger.warning(f"Unknown message type: {message_type}")
         

@@ -133,21 +133,28 @@ class CSVValidator:
         header_set = set(header_lower)  # Use set for O(1) lookup
         
         has_id = 'id' in header_set
+        # Plain columns (old format)
         has_source_id = 'source_id' in header_set
         has_target_id = 'target_id' in header_set
+        # New format: Label:source_id / Label:target_id (column name contains :source_id or :target_id)
+        has_label_source = any(
+            col.strip().endswith(':source_id') for col in header_lower
+        )
+        has_label_target = any(
+            col.strip().endswith(':target_id') for col in header_lower
+        )
+        is_relationship_format = (has_source_id and has_target_id) or (has_label_source and has_label_target)
         
-        # If file has source_id or target_id, it's likely a relationship file
-        # Check relationship requirements first
-        if has_source_id or has_target_id:
+        # If file has relationship columns (plain or Label:source_id / Label:target_id), treat as relationship file
+        if is_relationship_format:
             self.is_relationship_file = True
             missing_rel_cols = []
-            if not has_source_id:
-                missing_rel_cols.append('source_id')
+            if not has_source_id and not has_label_source:
+                missing_rel_cols.append('source_id or Label:source_id')
                 self.missing_required_columns.append('source_id')
-            if not has_target_id:
-                missing_rel_cols.append('target_id')
+            if not has_target_id and not has_label_target:
+                missing_rel_cols.append('target_id or Label:target_id')
                 self.missing_required_columns.append('target_id')
-            
             if missing_rel_cols:
                 cols_str = " and ".join(missing_rel_cols)
                 self.errors.append(f"For relationship files required fields: {cols_str}")
@@ -310,9 +317,15 @@ class RelationshipCSVValidator(CSVValidator):
         skip_source_id_check = 'source_id' in self.missing_required_columns
         skip_target_id_check = 'target_id' in self.missing_required_columns
         
-        # Find source_id and target_id columns (case-insensitive)
-        source_id_col = next((col for col in header if col.lower().strip() == 'source_id'), None)
-        target_id_col = next((col for col in header if col.lower().strip() == 'target_id'), None)
+        # Find source_id and target_id columns: exact 'source_id'/'target_id' or Label:source_id / Label:target_id
+        def col_is_source_id(c: str) -> bool:
+            cl = c.lower().strip()
+            return cl == 'source_id' or cl.endswith(':source_id')
+        def col_is_target_id(c: str) -> bool:
+            cl = c.lower().strip()
+            return cl == 'target_id' or cl.endswith(':target_id')
+        source_id_col = next((col for col in header if col_is_source_id(col)), None)
+        target_id_col = next((col for col in header if col_is_target_id(col)), None)
         
         # Check source_id
         if skip_source_id_check:
@@ -621,11 +634,14 @@ def detect_file_type(file_path: str) -> str:
             
             header_lower = [col.lower().strip() for col in header]
             
-            # Check if it has relationship indicators
+            # Check if it has relationship indicators (old format: source_id/target_id)
             has_source_id = 'source_id' in header_lower
             has_target_id = 'target_id' in header_lower
             
-            if has_source_id and has_target_id:
+            # Check for new format: Label:source_id or Label:target_id
+            has_label_format = any(':' in col and ('source_id' in col.lower() or 'target_id' in col.lower()) for col in header)
+            
+            if (has_source_id and has_target_id) or has_label_format:
                 return 'relationship'
             
             # Default to node
@@ -634,6 +650,75 @@ def detect_file_type(file_path: str) -> str:
         logger.warning(f"Error detecting file type for {file_path}: {e}")
         # Default to node on error
         return 'node'
+
+
+def parse_relationship_header(header: List[str]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], List[str]]:
+    """
+    Parse relationship CSV header to extract source and target labels.
+    
+    Expected format: "Actor:source_id, Movie:target_id, role, salary"
+    Or old format: "source_id, target_id, role, salary"
+    
+    Args:
+        header: List of column names from CSV header
+        
+    Returns:
+        Tuple of (source_label, target_label, source_col, target_col, errors)
+        - source_label: Label name for source node (e.g., "Actor")
+        - target_label: Label name for target node (e.g., "Movie")
+        - source_col: Full column name (e.g., "Actor:source_id")
+        - target_col: Full column name (e.g., "Movie:target_id")
+        - errors: List of error messages if format is invalid
+    """
+    errors = []
+    source_label = None
+    target_label = None
+    source_col = None
+    target_col = None
+    
+    # Find source and target columns
+    for col in header:
+        col_lower = col.lower().strip()
+        
+        # Check for new format: Label:source_id or Label:target_id
+        if ':' in col:
+            parts = col.split(':', 1)
+            if len(parts) == 2:
+                label_part = parts[0].strip()
+                id_part = parts[1].strip().lower()
+                
+                if id_part == 'source_id':
+                    source_label = label_part
+                    source_col = col
+                elif id_part == 'target_id':
+                    target_label = label_part
+                    target_col = col
+        
+        # Check for old format: source_id or target_id (without label)
+        elif col_lower == 'source_id':
+            source_col = col
+            errors.append("Missing label in source_id column. Expected format: 'Label:source_id' (e.g., 'Actor:source_id')")
+        elif col_lower == 'target_id':
+            target_col = col
+            errors.append("Missing label in target_id column. Expected format: 'Label:target_id' (e.g., 'Movie:target_id')")
+    
+    # Validate that we found both columns
+    if not source_col:
+        errors.append("Missing 'source_id' column. Expected format: 'Label:source_id' (e.g., 'Actor:source_id')")
+    if not target_col:
+        errors.append("Missing 'target_id' column. Expected format: 'Label:target_id' (e.g., 'Movie:target_id')")
+    
+    # If we have old format errors, return them
+    if errors:
+        return None, None, source_col, target_col, errors
+    
+    # Validate labels are not empty
+    if source_label and not source_label.strip():
+        errors.append("Source label is empty. Format should be 'Label:source_id' where Label is the node type name")
+    if target_label and not target_label.strip():
+        errors.append("Target label is empty. Format should be 'Label:target_id' where Label is the node type name")
+    
+    return source_label, target_label, source_col, target_col, errors
 
 
 def parse_csv(file_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:

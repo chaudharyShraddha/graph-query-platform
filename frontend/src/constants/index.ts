@@ -11,7 +11,6 @@ export const WS_MAX_RECONNECT_DELAY = 30000; // Max 30 seconds
 
 // Query Results
 export const ROWS_PER_PAGE = 50;
-export const MAX_EXPANDED_ROWS = 100;
 
 // Local Storage Keys
 export const STORAGE_KEYS = {
@@ -44,21 +43,10 @@ export const QUERY_TEMPLATES = [
   },
 ] as const;
 
-// Date Filter Options
-export const DATE_FILTER_OPTIONS = [
-  { value: 'all', label: 'All Time' },
-  { value: 'today', label: 'Today' },
-  { value: 'yesterday', label: 'Yesterday' },
-  { value: 'week', label: 'Last Week' },
-  { value: 'month', label: 'Last Month' },
-] as const;
-
-// Status Filter Options
-export const STATUS_FILTER_OPTIONS = [
-  { value: 'all', label: 'All Status' },
-  { value: 'pending', label: 'Pending' },
-  { value: 'processing', label: 'Processing' },
-  { value: 'completed', label: 'Completed' },
-  { value: 'failed', label: 'Failed' },
+// Upload wizard steps (create → nodes → relationships)
+export const UPLOAD_WIZARD_STEPS = [
+  { id: 'create', label: 'Create Dataset', description: 'Set up your dataset with name and description' },
+  { id: 'nodes', label: 'Upload Node Files', description: 'Upload CSV files containing node data' },
+  { id: 'relationships', label: 'Upload Relationship Files', description: 'Upload CSV files with relationships' },
 ] as const;
 

@@ -1,13 +1,9 @@
-"""
-Serializers for Query API endpoints.
-"""
+"""Query and QueryExecution serializers for API."""
 from rest_framework import serializers
 from queries.models import SavedQuery, QueryExecution
 
 
 class SavedQuerySerializer(serializers.ModelSerializer):
-    """Serializer for SavedQuery model."""
-    
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
     
     class Meta:
@@ -39,8 +35,6 @@ class SavedQuerySerializer(serializers.ModelSerializer):
 
 
 class SavedQueryListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for query list view."""
-    
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
     
     class Meta:
@@ -61,8 +55,6 @@ class SavedQueryListSerializer(serializers.ModelSerializer):
 
 
 class QueryExecutionSerializer(serializers.ModelSerializer):
-    """Serializer for QueryExecution model."""
-    
     executed_by_username = serializers.CharField(source='executed_by.username', read_only=True)
     query_name = serializers.CharField(source='query.name', read_only=True)
     
@@ -89,7 +81,6 @@ class QueryExecutionSerializer(serializers.ModelSerializer):
 
 
 class QueryExecuteSerializer(serializers.Serializer):
-    """Serializer for query execution request."""
     query = serializers.CharField(required=False, allow_blank=True)
     query_id = serializers.IntegerField(required=False)
     parameters = serializers.DictField(required=False, default=dict)
@@ -97,14 +88,12 @@ class QueryExecuteSerializer(serializers.Serializer):
     query_name = serializers.CharField(required=False, max_length=255)
     
     def validate(self, data):
-        """Validate that either query or query_id is provided."""
         if not data.get('query') and not data.get('query_id'):
             raise serializers.ValidationError("Either 'query' or 'query_id' must be provided")
         return data
 
 
 class QuerySaveSerializer(serializers.Serializer):
-    """Serializer for saving a query."""
     name = serializers.CharField(max_length=255)
     description = serializers.CharField(required=False, allow_blank=True)
     cypher_query = serializers.CharField()

@@ -7,6 +7,7 @@ data, including validation, parsing, type conversion, and Neo4j database operati
 import asyncio
 import logging
 import threading
+from pathlib import Path
 from typing import Dict, Any, Optional, List, Set, Tuple
 from datetime import datetime
 from django.utils import timezone
@@ -130,6 +131,10 @@ async def process_node_csv_task(task_id: int) -> None:
         is_valid, errors, warnings = validate_node_csv(task.file_path, task.node_label)
         
         if not is_valid:
+            # Clean up temp file
+            if task.file_path and Path(task.file_path).exists():
+                Path(task.file_path).unlink(missing_ok=True)
+            
             # Format errors for better readability
             if len(errors) == 1:
                 error_msg = errors[0]
@@ -152,6 +157,10 @@ async def process_node_csv_task(task_id: int) -> None:
         data, metadata = parse_csv(task.file_path)
         
         if not data:
+            # Clean up temp file
+            if task.file_path and Path(task.file_path).exists():
+                Path(task.file_path).unlink(missing_ok=True)
+            
             task.status = 'failed'
             task.error_message = 'CSV file contains no data'
             task.completed_at = timezone.now()
@@ -274,6 +283,30 @@ async def process_node_csv_task(task_id: int) -> None:
                 await send_task_update(task_id, 'error', {'message': str(e)})
                 return
         
+        # If dataset cascade_delete: sync to file — remove nodes of this label not in the file (and their relationships)
+        nodes_deleted = 0
+        if task.node_label and id_column:
+            dataset = await Dataset.objects.aget(id=task.dataset_id)
+            if dataset.cascade_delete:
+                try:
+                    ids_in_file = []
+                    for row in data:
+                        val = row.get(id_column)
+                        if val is not None:
+                            try:
+                                ids_in_file.append(int(val))
+                            except (ValueError, TypeError):
+                                ids_in_file.append(val)
+                    nodes_deleted = await neo4j_client.delete_nodes_not_in_set(
+                        label=task.node_label or 'Node',
+                        dataset_id=task.dataset_id,
+                        id_property=id_column,
+                        ids_in_file=ids_in_file,
+                    )
+                    logger.info(f"Cascade delete: removed {nodes_deleted} nodes not in file for label {task.node_label}")
+                except Exception as e:
+                    logger.warning(f"Cascade delete (sync nodes) failed: {e}", exc_info=True)
+
         # Mark task as completed
         task.status = 'completed'
         task.completed_at = timezone.now()
@@ -281,9 +314,17 @@ async def process_node_csv_task(task_id: int) -> None:
             task.progress_percentage = 100.0
         await task.asave(update_fields=['status', 'completed_at', 'progress_percentage', 'updated_at'])
         
-        # Update dataset node count
+        # Clean up temporary file
+        if task.file_path and Path(task.file_path).exists():
+            try:
+                Path(task.file_path).unlink()
+                logger.info(f"Cleaned up temporary file: {task.file_path}")
+            except Exception as e:
+                logger.warning(f"Error cleaning up temp file {task.file_path}: {e}")
+        
+        # Update dataset node count (created - deleted for sync)
         dataset = await Dataset.objects.aget(id=task.dataset_id)
-        dataset.total_nodes += nodes_created
+        dataset.total_nodes += nodes_created - nodes_deleted
         await dataset.asave(update_fields=['total_nodes', 'updated_at'])
         
         # Update dataset status
@@ -375,6 +416,10 @@ async def process_relationship_csv_task(task_id: int) -> None:
         data, metadata = parse_csv(task.file_path)
         
         if not data:
+            # Clean up temp file
+            if task.file_path and Path(task.file_path).exists():
+                Path(task.file_path).unlink(missing_ok=True)
+            
             task.status = 'failed'
             task.error_message = 'Empty file'
             task.completed_at = timezone.now()
@@ -390,49 +435,69 @@ async def process_relationship_csv_task(task_id: int) -> None:
         task.total_rows = len(data)
         await task.asave(update_fields=['total_rows'])
         
-        # Get source and target labels from dataset's node tasks
-        dataset = await Dataset.objects.aget(id=task.dataset_id)
+        # Get source and target labels from task (already set in view)
+        source_label = task.source_label
+        target_label = task.target_label
         
-        # Get all node labels from node tasks in this dataset (including processing ones)
-        # This ensures we can find labels even if tasks are still processing
-        # Use async queryset to filter node tasks
+        # Build list of node labels available in this dataset (from completed node uploads)
         node_labels = []
-        async for node_task in UploadTask.objects.filter(dataset_id=task.dataset_id, file_type='node'):
-            if node_task.node_label:
-                node_labels.append(node_task.node_label)
+        async for t in UploadTask.objects.filter(dataset_id=task.dataset_id, file_type='node', status='completed'):
+            if t.node_label and t.node_label not in node_labels:
+                node_labels.append(t.node_label)
         
-        # If no node labels found from tasks, try to find any node labels in Neo4j
-        if not node_labels:
-            try:
-                schema = await neo4j_client.get_schema()
-                node_labels = schema.get('node_labels', [])
-                logger.info(f"Found {len(node_labels)} node labels from Neo4j schema")
-            except Exception as e:
-                logger.warning(f"Could not get schema from Neo4j: {e}")
+        # If we have source/target from header, check they exist in the dataset
+        if source_label or target_label:
+            missing = []
+            if source_label and source_label not in node_labels:
+                missing.append(source_label)
+            if target_label and target_label not in node_labels:
+                if target_label not in missing:
+                    missing.append(target_label)
+            if missing:
+                if task.file_path and Path(task.file_path).exists():
+                    Path(task.file_path).unlink(missing_ok=True)
+                labels_str = ', '.join(missing)
+                error_msg = (
+                    f"{labels_str} node(s) not available in dataset. "
+                    f"Please upload the corresponding node file(s) first."
+                )
+                task.status = 'failed'
+                task.error_message = error_msg
+                task.completed_at = timezone.now()
+                await task.asave(update_fields=['status', 'error_message', 'completed_at', 'updated_at'])
+                await update_dataset_status(task.dataset_id)
+                await send_task_update(task_id, 'error', {'message': error_msg})
+                return
         
-        # Default to 'Node' if still no labels found
-        if not node_labels:
-            node_labels = ['Node']
-            logger.warning("No node labels found, defaulting to 'Node'")
-
-        # Determine source and target labels
-        # Strategy 1: Use relationship type name to infer labels (e.g., PURCHASED = Customer->Product)
-        # Strategy 2: If inference fails, use ID matching with better heuristics
-        source_label = None
-        target_label = None
+        if not source_label or not target_label:
+            # Clean up temp file
+            if task.file_path and Path(task.file_path).exists():
+                Path(task.file_path).unlink(missing_ok=True)
+            
+            task.status = 'failed'
+            task.error_message = f'Missing source or target labels. Source: {source_label}, Target: {target_label}'
+            task.completed_at = timezone.now()
+            await task.asave(update_fields=['status', 'error_message', 'completed_at', 'updated_at'])
+            
+            # Update dataset status
+            await update_dataset_status(task.dataset_id)
+            
+            await send_task_update(task_id, 'error', {'message': task.error_message})
+            return
         
-        # Try to infer labels from relationship type name
-        inferred_source, inferred_target = infer_labels_from_relationship_type(
-            task.relationship_type,
-            node_labels
-        )
-        if inferred_source and inferred_target:
-            source_label = inferred_source
-            target_label = inferred_target
-            logger.info(
-                f"Inferred labels from relationship type '{task.relationship_type}': "
-                f"{source_label} -> {target_label}"
+        # Infer or resolve labels only when missing (e.g. old CSV format without Label:source_id)
+        if not source_label or not target_label:
+            inferred_source, inferred_target = infer_labels_from_relationship_type(
+                task.relationship_type,
+                node_labels
             )
+            if inferred_source and inferred_target:
+                source_label = inferred_source
+                target_label = inferred_target
+                logger.info(
+                    f"Inferred labels from relationship type '{task.relationship_type}': "
+                    f"{source_label} -> {target_label}"
+                )
         
         # If inference didn't work, fall back to ID matching
         if not source_label or not target_label:
@@ -557,8 +622,15 @@ async def process_relationship_csv_task(task_id: int) -> None:
         logger.info(f"Processing relationship file '{task.file_name}' with type '{task.relationship_type}'")
         logger.info(f"Using node labels: source={source_label}, target={target_label}")
         logger.info(f"Found {len(data)} relationship rows to process")
-        
-        
+
+        # If cascade_delete: re-upload replaces — remove existing relationships of this type so file is source of truth. Otherwise leave existing in Neo4j (orphans).
+        dataset = await Dataset.objects.aget(id=task.dataset_id)
+        if dataset.cascade_delete:
+            await send_task_update(task_id, 'progress', {'message': 'Syncing to file (removing previous relationships)...', 'percentage': 12})
+            await neo4j_client.delete_relationships_of_type_for_dataset(
+                task.relationship_type or 'RELATED_TO', task.dataset_id
+            )
+
         # Process relationships in batches
         total_batches = (len(data) + BATCH_SIZE - 1) // BATCH_SIZE
         relationships_created = 0
@@ -570,19 +642,41 @@ async def process_relationship_csv_task(task_id: int) -> None:
             
             # Prepare relationships for Neo4j
             neo4j_rels = []
-            for row in batch:
-                # Find source_id and target_id columns (case-insensitive)
+            validation_warnings = []
+            skipped_count = 0
+            
+            for row_idx, row in enumerate(batch, start=start_idx + 1):
+                # Find source_id and target_id columns (new format: Label:source_id)
                 source_id = None
                 target_id = None
+                source_col = None
+                target_col = None
+                
                 for key, value in row.items():
-                    key_lower = key.lower().strip()
-                    if key_lower == 'source_id':
+                    # Check for new format: Label:source_id or Label:target_id
+                    if ':' in key:
+                        parts = key.split(':', 1)
+                        if len(parts) == 2:
+                            label_part = parts[0].strip()
+                            id_part = parts[1].strip().lower()
+                            
+                            if id_part == 'source_id' and label_part == source_label:
+                                source_id = value
+                                source_col = key
+                            elif id_part == 'target_id' and label_part == target_label:
+                                target_id = value
+                                target_col = key
+                    # Fallback to old format (for backward compatibility)
+                    elif key.lower().strip() == 'source_id':
                         source_id = value
-                    elif key_lower == 'target_id':
+                        source_col = key
+                    elif key.lower().strip() == 'target_id':
                         target_id = value
+                        target_col = key
                 
                 if not source_id or not target_id:
-                    logger.warning(f"Row missing source_id or target_id: {row}")
+                    skipped_count += 1
+                    validation_warnings.append(f"Row {row_idx}: Missing source_id or target_id")
                     continue
                 
                 # Convert IDs to integers if they're numeric (to match node IDs)
@@ -640,6 +734,40 @@ async def process_relationship_csv_task(task_id: int) -> None:
                         
                         rel_data['properties'][key] = converted_value
                 
+                # Validate that source and target nodes exist before adding to batch
+                try:
+                    # Check source node exists
+                    source_query = f"MATCH (n:{source_label} {{id: $id, dataset_id: $dataset_id}}) RETURN count(n) as count"
+                    source_result = await neo4j_client.execute_query(
+                        source_query,
+                        {'id': source_id, 'dataset_id': task.dataset_id}
+                    )
+                    source_exists = source_result and source_result[0].get('count', 0) > 0
+                    
+                    # Check target node exists
+                    target_query = f"MATCH (n:{target_label} {{id: $id, dataset_id: $dataset_id}}) RETURN count(n) as count"
+                    target_result = await neo4j_client.execute_query(
+                        target_query,
+                        {'id': target_id, 'dataset_id': task.dataset_id}
+                    )
+                    target_exists = target_result and target_result[0].get('count', 0) > 0
+                    
+                    if not source_exists:
+                        skipped_count += 1
+                        validation_warnings.append(f"Row {row_idx}: Source node {source_label}:{source_id} does not exist")
+                        continue
+                    
+                    if not target_exists:
+                        skipped_count += 1
+                        validation_warnings.append(f"Row {row_idx}: Target node {target_label}:{target_id} does not exist")
+                        continue
+                    
+                except Exception as e:
+                    logger.warning(f"Error validating nodes for row {row_idx}: {e}")
+                    skipped_count += 1
+                    validation_warnings.append(f"Row {row_idx}: Error validating nodes: {str(e)}")
+                    continue
+                
                 # Add dataset_id to relationship properties to track which dataset it belongs to
                 rel_data['properties']['dataset_id'] = task.dataset_id
                 
@@ -647,29 +775,21 @@ async def process_relationship_csv_task(task_id: int) -> None:
             
             # Create relationships in Neo4j
             try:
-                created_count = await neo4j_client.create_relationships_batch(
-                    source_label=source_label,
-                    source_id_key='id',
-                    target_label=target_label,
-                    target_id_key='id',
-                    relationship_type=task.relationship_type or 'RELATED_TO',
-                    relationships=neo4j_rels,
-                    batch_size=BATCH_SIZE
-                )
-                
-                logger.info(f"Batch {batch_num + 1}: Created {created_count} relationships (expected {len(batch)})")
-                relationships_created += created_count
-                
-                # If fewer relationships created than expected, log detailed warning
-                if created_count < len(batch):
-                    logger.warning(
-                        f"Batch {batch_num + 1}: Only {created_count}/{len(batch)} relationships created. "
-                        f"This might indicate missing source or target nodes with label '{source_label}' or '{target_label}'. "
-                        f"Relationship type: '{task.relationship_type}'"
+                if neo4j_rels:
+                    created_count = await neo4j_client.create_relationships_batch(
+                        source_label=source_label,
+                        source_id_key='id',
+                        target_label=target_label,
+                        target_id_key='id',
+                        relationship_type=task.relationship_type or 'RELATED_TO',
+                        relationships=neo4j_rels,
+                        batch_size=BATCH_SIZE
                     )
-                    # Log sample source/target IDs for debugging
-                    sample_ids = [(r.get('source_id'), r.get('target_id')) for r in neo4j_rels[:3]]
-                    logger.warning(f"Sample source_id/target_id pairs: {sample_ids}")
+                    
+                    logger.info(f"Batch {batch_num + 1}: Created {created_count} relationships (expected {len(neo4j_rels)})")
+                    relationships_created += created_count
+                else:
+                    logger.warning(f"Batch {batch_num + 1}: No valid relationships to create (all skipped)")
                 
                 # Update progress
                 processed = end_idx
@@ -703,12 +823,27 @@ async def process_relationship_csv_task(task_id: int) -> None:
                 await send_task_update(task_id, 'error', {'message': str(e)})
                 return
         
+        # Save validation warnings
+        if validation_warnings:
+            task.validation_warnings = validation_warnings[:100]  # Limit to first 100 warnings
+            if skipped_count > 0:
+                warning_summary = f"Skipped {skipped_count} rows due to validation errors. See validation_warnings for details."
+                logger.warning(warning_summary)
+        
         # Mark task as completed
         task.status = 'completed'
         task.completed_at = timezone.now()
         if task.total_rows > 0:
             task.progress_percentage = 100.0
-        await task.asave(update_fields=['status', 'completed_at', 'progress_percentage', 'updated_at'])
+        await task.asave(update_fields=['status', 'completed_at', 'progress_percentage', 'validation_warnings', 'updated_at'])
+        
+        # Clean up temporary file
+        if task.file_path and Path(task.file_path).exists():
+            try:
+                Path(task.file_path).unlink()
+                logger.info(f"Cleaned up temporary file: {task.file_path}")
+            except Exception as e:
+                logger.warning(f"Error cleaning up temp file {task.file_path}: {e}")
         
         # Update dataset relationship count - verify from Neo4j for accuracy
         dataset = await Dataset.objects.aget(id=task.dataset_id)

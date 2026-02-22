@@ -31,6 +31,10 @@ class Dataset(models.Model):
     total_nodes = models.IntegerField(default=0)
     total_relationships = models.IntegerField(default=0)
     
+    # Cascade delete: when True, (1) deleting relationships cascades to related relationships;
+    # (2) re-uploading a node file syncs to file: nodes not in the file are removed with their relationships.
+    cascade_delete = models.BooleanField(default=False)
+    
     class Meta:
         ordering = ['-created_at']
         verbose_name = 'Dataset'
@@ -90,6 +94,13 @@ class UploadTask(models.Model):
     # Neo4j metadata
     node_label = models.CharField(max_length=100, blank=True, null=True)  # For node files
     relationship_type = models.CharField(max_length=100, blank=True, null=True)  # For relationship files
+    
+    # Relationship-specific fields
+    source_label = models.CharField(max_length=100, blank=True, null=True)  # Source node label for relationships
+    target_label = models.CharField(max_length=100, blank=True, null=True)  # Target node label for relationships
+    
+    # Validation warnings (for skipped rows, etc.)
+    validation_warnings = models.JSONField(default=list, blank=True)  # List of warning messages
     
     class Meta:
         ordering = ['-created_at']

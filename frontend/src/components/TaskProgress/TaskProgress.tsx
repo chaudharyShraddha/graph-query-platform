@@ -24,7 +24,7 @@ const TaskProgress = ({ taskId, onComplete, onError }: TaskProgressProps) => {
     callbacksRef.current = { onComplete, onError };
   }, [onComplete, onError]);
 
-  const { isConnected } = useTaskProgress({
+  useTaskProgress({
     taskId,
     enabled: true,
   });
@@ -51,9 +51,6 @@ const TaskProgress = ({ taskId, onComplete, onError }: TaskProgressProps) => {
         <span className={`task-progress-status status-${currentStatus}`}>
           {currentStatus}
         </span>
-        {!isConnected && (
-          <span className="task-progress-connection">Connecting...</span>
-        )}
       </div>
 
       {currentStatus === 'processing' && (

@@ -1,0 +1,6 @@
+Person:source_id,Movie:target_id,role,character_name
+1,5,actor,Captain Miller
+2,2,actor,Kay Graham
+4,3,actor,Dom Cobb
+6,4,actor,Mia
+1,2,actor,Ben Bradlee

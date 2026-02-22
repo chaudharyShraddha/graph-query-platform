@@ -100,25 +100,26 @@
   white-space: nowrap;
 }
 
-.status-pending {
+/* Scoped so these don't affect dataset list cards */
+.dataset-panel .status-pending {
   background-color: #f5f5f5;
   color: #666;
   border-radius: 12px;
 }
 
-.status-processing {
+.dataset-panel .status-processing {
   background-color: var(--color-primary-light);
   color: #7c3aed;
   border-radius: 12px;
 }
 
-.status-completed {
+.dataset-panel .status-completed {
   background-color: #e8f5e9;
   color: #2e7d32;
   border-radius: 12px;
 }
 
-.status-failed {
+.dataset-panel .status-failed {
   background-color: #ffebee;
   color: #c62828;
   border-radius: 12px;
@@ -229,14 +230,13 @@
   align-items: center;
   gap: 12px;
   padding: 16px;
-  background-color: #f9f9f9;
+  background-color: transparent;
   border-radius: 8px;
   border: 1px solid #e0e0e0;
   transition: all 0.2s;
 }
 
 .stat-card:hover {
-  background-color: #f5f5f5;
   border-color: #d0d0d0;
 }
 
@@ -414,7 +414,7 @@
 
 .file-card {
   padding: 10px;
-  background-color: #f9f9f9;
+  background-color: transparent;
   border-radius: 6px;
   border: 1px solid #e0e0e0;
 }

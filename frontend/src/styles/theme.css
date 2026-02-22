@@ -3,25 +3,30 @@
  * Clean, modern, enterprise-grade design system
  */
 :root {
-  /* Minimal Color Palette - Professional & Subtle */
+  /* Card surface (used by dataset cards, etc.) */
+  --card-bg: #ffffff;
+  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --card-shadow-hover: 0 8px 24px rgba(0, 0, 0, 0.08);
+
+  /* Color Palette */
   --color-primary: #7c3aed;
   --color-primary-hover: #6d28d9;
   --color-primary-light: #ede9fe;
-  
+
   --color-secondary: #0d9488;
   --color-secondary-hover: #0f766e;
   --color-secondary-light: #ccfbf1;
-  
+
   --color-success: #10b981;
   --color-success-light: #d1fae5;
-  
+
   --color-warning: #f59e0b;
   --color-warning-light: #fef3c7;
-  
+
   --color-error: #ef4444;
   --color-error-light: #fee2e2;
 
-  /* Neutral Grays - Minimal & Clean */
+  /* Neutral Grays */
   --color-gray-50: #fafafa;
   --color-gray-100: #f5f5f5;
   --color-gray-200: #e5e5e5;
@@ -252,7 +257,7 @@ input::placeholder, textarea::placeholder {
 
 /* Minimal Card Styles */
 .card {
-  background-color: var(--bg-primary);
+  background-color: transparent;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xs);

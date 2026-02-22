@@ -252,7 +252,7 @@
 .query-results {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  background-color: var(--bg-primary);
+  background-color: transparent;
   overflow: hidden;
 }
 

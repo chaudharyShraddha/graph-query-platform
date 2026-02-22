@@ -1,29 +1,27 @@
 /**
- * Dataset Card Component
+ * Dataset Card Component - Click anywhere to open detail page.
  */
-import { useState, memo } from 'react';
+import { memo, useCallback } from 'react';
 import type { Dataset } from '@/types';
-import { ViewIcon, DownloadIcon, DeleteIcon, MoreDotsIcon } from '@/components/Icons/Icons';
 import './DatasetCard.css';
 
 interface DatasetCardProps {
   dataset: Dataset;
   viewMode: 'grid' | 'list';
   onView: () => void;
-  onDownload: (
-    datasetId: number,
-    options?: {
-      fileType?: 'node' | 'relationship';
-      nodeLabel?: string;
-      relationshipType?: string;
-      asZip?: boolean;
-    }
-  ) => void;
-  onDelete: (datasetId: number) => void;
 }
 
-const DatasetCard = memo(({ dataset, viewMode, onView, onDownload, onDelete }: DatasetCardProps) => {
-  const [showActionsMenu, setShowActionsMenu] = useState(false);
+const DatasetCard = memo(({ dataset, viewMode, onView }: DatasetCardProps) => {
+  const handleCardKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onView();
+      }
+    },
+    [onView]
+  );
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'completed':
@@ -37,18 +35,21 @@ const DatasetCard = memo(({ dataset, viewMode, onView, onDownload, onDelete }: D
     }
   };
 
-  const getStatusIcon = (status: string) => {
-    return '';
-  };
+  const statusClass = `status-${dataset.status}`;
 
   if (viewMode === 'list') {
     return (
-      <div className="dataset-card list-view">
+      <div
+        className={`dataset-card list-view ${statusClass}`}
+        onClick={onView}
+        onKeyDown={handleCardKeyDown}
+        role="button"
+        tabIndex={0}
+        aria-label={`View dataset ${dataset.name}`}
+      >
         <div className="dataset-card-main">
           <div className="dataset-card-header">
-            <h3 onClick={onView} className="dataset-title">
-              {dataset.name}
-            </h3>
+            <h3 className="dataset-title">{dataset.name}</h3>
             <span
               className="dataset-status"
               style={{ color: getStatusColor(dataset.status) }}
@@ -56,60 +57,27 @@ const DatasetCard = memo(({ dataset, viewMode, onView, onDownload, onDelete }: D
               {dataset.status}
             </span>
           </div>
-          {dataset.description && (
-            <p className="dataset-description">{dataset.description}</p>
-          )}
           <div className="dataset-stats">
             <span>{dataset.total_nodes ?? 0} nodes</span>
             <span>{dataset.total_relationships ?? 0} relationships</span>
             <span>{dataset.total_files ?? 0} files</span>
           </div>
         </div>
-        <div className="dataset-card-actions">
-          <div className="actions-menu-container">
-            <button
-              className="btn btn-sm btn-actions-menu"
-              onClick={() => setShowActionsMenu(!showActionsMenu)}
-              title="More actions"
-              aria-label="More actions"
-            >
-              <MoreDotsIcon size={20} />
-            </button>
-            {showActionsMenu && (
-              <>
-                <div className="actions-menu-overlay" onClick={() => setShowActionsMenu(false)} />
-                <div className="actions-menu">
-                  <button className="actions-menu-item" onClick={() => { onView(); setShowActionsMenu(false); }}>
-                    <ViewIcon size={16} />
-                    <span>View Details</span>
-                  </button>
-                  <button className="actions-menu-item" onClick={() => { onDownload(dataset.id); setShowActionsMenu(false); }}>
-                    <DownloadIcon size={16} />
-                    <span>Download All</span>
-                  </button>
-                  <button className="actions-menu-item" onClick={() => { onDelete(dataset.id); setShowActionsMenu(false); }}>
-                    <DeleteIcon size={16} />
-                    <span>Delete</span>
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-          <button className="btn btn-sm btn-primary" onClick={onView}>
-            <ViewIcon size={16} />
-            <span>View Details</span>
-          </button>
-        </div>
       </div>
     );
   }
 
   return (
-    <div className="dataset-card grid-view">
+    <div
+      className={`dataset-card grid-view ${statusClass}`}
+      onClick={onView}
+      onKeyDown={handleCardKeyDown}
+      role="button"
+      tabIndex={0}
+      aria-label={`View dataset ${dataset.name}`}
+    >
       <div className="dataset-card-header">
-        <h3 onClick={onView} className="dataset-title">
-          {dataset.name}
-        </h3>
+        <h3 className="dataset-title">{dataset.name}</h3>
         <span
           className="dataset-status"
           style={{ color: getStatusColor(dataset.status) }}
@@ -118,9 +86,11 @@ const DatasetCard = memo(({ dataset, viewMode, onView, onDownload, onDelete }: D
         </span>
       </div>
 
-      {dataset.description && (
-        <p className="dataset-description">{dataset.description}</p>
-      )}
+      <div className="dataset-options">
+        {dataset.cascade_delete && (
+          <span className="cascade-badge">Cascade Delete</span>
+        )}
+      </div>
 
       <div className="dataset-stats">
         <div className="stat-item">
@@ -139,44 +109,8 @@ const DatasetCard = memo(({ dataset, viewMode, onView, onDownload, onDelete }: D
 
       <div className="dataset-card-footer">
         <span className="dataset-date">
-          Created: {new Date(dataset.created_at).toLocaleDateString()}
+          {new Date(dataset.created_at).toLocaleDateString()}
         </span>
-      </div>
-
-      <div className="dataset-card-actions">
-        <div className="actions-menu-container">
-          <button
-            className="btn btn-sm btn-actions-menu"
-            onClick={() => setShowActionsMenu(!showActionsMenu)}
-            title="More actions"
-            aria-label="More actions"
-            >
-              <MoreDotsIcon size={20} />
-            </button>
-          {showActionsMenu && (
-            <>
-              <div className="actions-menu-overlay" onClick={() => setShowActionsMenu(false)} />
-              <div className="actions-menu">
-                <button className="actions-menu-item" onClick={() => { onView(); setShowActionsMenu(false); }}>
-                  <ViewIcon size={16} />
-                  <span>View Details</span>
-                </button>
-                <button className="actions-menu-item" onClick={() => { onDownload(dataset.id); setShowActionsMenu(false); }}>
-                  <DownloadIcon size={16} />
-                  <span>Download All</span>
-                </button>
-                <button className="actions-menu-item" onClick={() => { onDelete(dataset.id); setShowActionsMenu(false); }}>
-                  <DeleteIcon size={16} />
-                  <span>Delete</span>
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-        <button className="btn btn-sm btn-primary" onClick={onView}>
-          <ViewIcon size={16} />
-          <span>View Details</span>
-        </button>
       </div>
     </div>
   );

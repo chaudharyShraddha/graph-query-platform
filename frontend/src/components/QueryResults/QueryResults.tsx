@@ -4,7 +4,7 @@
  * Displays query execution results in both table and JSON formats
  * with sorting, pagination, and export functionality.
  */
-import { useState, useMemo, memo } from 'react';
+import { useState, useMemo, type ReactNode } from 'react';
 import { DownloadIcon, CopyIcon } from '@/components/Icons/Icons';
 import { toast } from '@/utils/toast';
 import { ROWS_PER_PAGE } from '@/constants';
@@ -19,12 +19,11 @@ interface QueryResultsProps {
 
 type ViewMode = 'table' | 'json';
 
-const QueryResults = ({ results, executionTime, rowsReturned, error }: QueryResultsProps) => {
+const QueryResults = ({ results, executionTime, error }: QueryResultsProps) => {
   const [viewMode, setViewMode] = useState<ViewMode>('table');
   const [currentPage, setCurrentPage] = useState(1);
   const [sortColumn, setSortColumn] = useState<string | null>(null);
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
-  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [expandedJsonPaths, setExpandedJsonPaths] = useState<Set<string>>(new Set());
 
   // Get column names from first result
@@ -101,17 +100,6 @@ const QueryResults = ({ results, executionTime, rowsReturned, error }: QueryResu
     setCurrentPage(1);
   };
 
-  // Toggle row expansion for JSON view
-  const toggleRowExpansion = (index: number) => {
-    const newExpanded = new Set(expandedRows);
-    if (newExpanded.has(index)) {
-      newExpanded.delete(index);
-    } else {
-      newExpanded.add(index);
-    }
-    setExpandedRows(newExpanded);
-  };
-
   // Export to CSV
   const handleExportCSV = () => {
     if (!results || results.length === 0) return;
@@ -183,7 +171,7 @@ const QueryResults = ({ results, executionTime, rowsReturned, error }: QueryResu
   };
 
   // Render JSON with collapsible nested objects
-  const renderJSONValue = (value: any, path: string = '', depth: number = 0): JSX.Element => {
+  const renderJSONValue = (value: any, path: string = '', depth: number = 0): ReactNode => {
     if (value === null) {
       return <span className="json-null">null</span>;
     }

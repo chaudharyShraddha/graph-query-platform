@@ -1,9 +1,11 @@
 /**
  * React hook for WebSocket connections
  */
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { websocketManager } from '@/services/websocket';
 import type { WebSocketMessage } from '@/types';
+
+type ConnectionStatus = 'connecting' | 'open' | 'closing' | 'closed';
 
 interface UseWebSocketOptions {
   taskId: number | null;
@@ -26,22 +28,24 @@ export const useWebSocket = ({
   enabled = true,
 }: UseWebSocketOptions) => {
   const callbacksRef = useRef({ onMessage, onConnect, onDisconnect, onError });
+  const [status, setStatus] = useState<ConnectionStatus>('closed');
 
   // Update callbacks ref when they change
   useEffect(() => {
     callbacksRef.current = { onMessage, onConnect, onDisconnect, onError };
   }, [onMessage, onConnect, onDisconnect, onError]);
 
-  // Wrapped callbacks that use the ref
   const handleMessage = useCallback((message: WebSocketMessage) => {
     callbacksRef.current.onMessage?.(message);
   }, []);
 
   const handleConnect = useCallback(() => {
+    setStatus('open');
     callbacksRef.current.onConnect?.();
   }, []);
 
   const handleDisconnect = useCallback(() => {
+    setStatus('closed');
     callbacksRef.current.onDisconnect?.();
   }, []);
 
@@ -49,13 +53,14 @@ export const useWebSocket = ({
     callbacksRef.current.onError?.(error);
   }, []);
 
-  // Connect/disconnect effect
   useEffect(() => {
     if (!enabled || !taskId) {
       websocketManager.disconnect();
+      setStatus('closed');
       return;
     }
 
+    setStatus('connecting');
     websocketManager.connect({
       taskId,
       onMessage: handleMessage,
@@ -64,21 +69,21 @@ export const useWebSocket = ({
       onError: handleError,
     });
 
-    // Cleanup on unmount or when taskId changes
     return () => {
       websocketManager.disconnect();
+      setStatus('closed');
     };
   }, [taskId, enabled, handleMessage, handleConnect, handleDisconnect, handleError]);
 
   // Request status when connected
   useEffect(() => {
-    if (enabled && taskId && websocketManager.getStatus() === 'open') {
+    if (status === 'open' && taskId) {
       websocketManager.requestStatus();
     }
-  }, [taskId, enabled]);
+  }, [status, taskId]);
 
   return {
-    status: websocketManager.getStatus(),
+    status,
     send: (message: Record<string, any>) => websocketManager.send(message),
     requestStatus: () => websocketManager.requestStatus(),
     disconnect: () => websocketManager.disconnect(),

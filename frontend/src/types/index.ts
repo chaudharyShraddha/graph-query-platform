@@ -1,20 +1,9 @@
-/**
- * Common TypeScript types for the application
- */
-
-// API Response types
-export interface ApiResponse<T> {
-  data: T;
-  status: number;
-  message?: string;
-}
-
+/** Shared API and domain types. */
 export interface ApiError {
   error: string;
   details?: Record<string, any>;
 }
 
-// Dataset types
 export interface Dataset {
   id: number;
   name: string;
@@ -28,7 +17,17 @@ export interface Dataset {
   processed_files: number;
   total_nodes: number;
   total_relationships: number;
+  cascade_delete?: boolean;
   upload_tasks?: UploadTask[];
+  summary?: {
+    total_nodes: number;
+    total_relationships: number;
+    total_files: number;
+    success_files: number;
+    failed_files: number;
+  };
+  node_summary?: { name: string; total_rows: number }[];
+  relationship_summary?: { name: string; total_rows: number }[];
 }
 
 export interface UploadTask {
@@ -46,6 +45,21 @@ export interface UploadTask {
   completed_at?: string;
   created_at: string;
   updated_at: string;
+}
+
+/** Per-file result from upload-nodes or upload-relationships API. Only file_name, status, error (when failed), task_id (when accepted). */
+export interface FileUploadResult {
+  file_name: string;
+  status: 'accepted' | 'failed';
+  error?: string;
+  task_id?: number;
+}
+
+/** Response from POST /datasets/:id/upload-nodes/ and upload-relationships/ */
+export interface UploadNodesOrRelationshipsResponse {
+  dataset: Dataset;
+  file_results: FileUploadResult[];
+  summary: { total: number; accepted: number; failed: number };
 }
 
 // Query types
@@ -96,7 +110,6 @@ export interface QueryExecuteResponse {
   execution_id: number;
 }
 
-// Schema types
 export interface NodeLabel {
   label: string;
   count: number;
@@ -115,7 +128,6 @@ export interface Schema {
   total_relationships: number;
 }
 
-// WebSocket types
 export interface WebSocketMessage {
   type: 'connection' | 'progress' | 'status' | 'error' | 'pong';
   task_id: number;

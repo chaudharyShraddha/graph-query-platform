@@ -31,6 +31,9 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-!b-a=fe1thyx!+pe02d1ut)7e0
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+if DEBUG and 'localhost:5173' not in ALLOWED_HOSTS:
+    # Allow Vite dev server origin for WebSocket (AllowedHostsOriginValidator)
+    ALLOWED_HOSTS.append('localhost:5173')
 
 
 # Application definition

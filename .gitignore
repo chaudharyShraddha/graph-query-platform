@@ -75,8 +75,6 @@ Thumbs.db
 desktop.ini
 
 # Project specific
-*.csv
-!samples/*.csv
 uploads/
 temp/
 *.db
